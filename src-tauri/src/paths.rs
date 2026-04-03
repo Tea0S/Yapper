@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use tauri::path::BaseDirectory;
 use tauri::Manager;
 
 pub fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -20,12 +21,25 @@ pub fn model_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Windows: `resources/python-runtime/python.exe` after running `scripts/bundle-windows-python-runtime.ps1`.
+/// Embeddable interpreter from `src-tauri/resources/python-runtime/` (bundled as `$RESOURCE/resources/...`).
 pub fn bundled_python_exe(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let res = app.path().resource_dir().ok()?;
-    let exe = res.join("python-runtime").join("python.exe");
-    if exe.is_file() {
-        return Some(exe);
+    let candidates = [
+        // Matches `bundle.resources` entry `resources/**/*`
+        app
+            .path()
+            .resolve("resources/python-runtime/python.exe", BaseDirectory::Resource)
+            .ok(),
+        // Legacy / mistaken join (keep if an older layout existed)
+        app
+            .path()
+            .resource_dir()
+            .ok()
+            .map(|r| r.join("python-runtime").join("python.exe")),
+    ];
+    for p in candidates.into_iter().flatten() {
+        if p.is_file() {
+            return Some(p);
+        }
     }
     None
 }
@@ -48,10 +62,13 @@ pub fn sidecar_script_path(app: &tauri::AppHandle) -> PathBuf {
             return next_to_exe;
         }
     }
-    if let Ok(res) = app.path().resource_dir() {
-        let bundled = res.join("sidecar").join("server.py");
-        if bundled.is_file() {
-            return bundled;
+    // Tauri maps `../` in bundle paths to `_up_/…` under resource_dir — use the same rules as the bundler.
+    if let Ok(p) = app
+        .path()
+        .resolve("../sidecar/server.py", BaseDirectory::Resource)
+    {
+        if p.is_file() {
+            return p;
         }
     }
     std::env::current_exe()
@@ -79,10 +96,12 @@ pub fn yapper_node_main_path(app: &tauri::AppHandle) -> PathBuf {
             return next_to_exe;
         }
     }
-    if let Ok(res) = app.path().resource_dir() {
-        let bundled = res.join("yapper-node").join("main.py");
-        if bundled.is_file() {
-            return bundled;
+    if let Ok(p) = app
+        .path()
+        .resolve("../yapper-node/main.py", BaseDirectory::Resource)
+    {
+        if p.is_file() {
+            return p;
         }
     }
     std::env::current_exe()

@@ -8,6 +8,36 @@
 #>
 $ErrorActionPreference = "Stop"
 
+function Save-RemoteFile {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Urls,
+        [Parameter(Mandatory = $true)][string]$OutPath
+    )
+    $lastErr = $null
+    foreach ($u in $Urls) {
+        Write-Host "Download: $u"
+        try {
+            Invoke-WebRequest -Uri $u -OutFile $OutPath -UseBasicParsing -UseDefaultCredentials
+            if ((Test-Path $OutPath) -and ((Get-Item $OutPath).Length -gt 1000)) {
+                return
+            }
+        }
+        catch {
+            $lastErr = $_
+            Write-Warning $_.Exception.Message
+        }
+        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        if ($curl) {
+            Remove-Item $OutPath -Force -ErrorAction SilentlyContinue
+            & curl.exe -fsSL --connect-timeout 30 -o $OutPath $u
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $OutPath) -and ((Get-Item $OutPath).Length -gt 1000)) {
+                return
+            }
+        }
+    }
+    throw "Could not download file (check DNS / VPN / firewall). Last error: $lastErr"
+}
+
 $Root = Split-Path -Parent $PSScriptRoot
 $ReqFile = Join-Path $Root "scripts\python-runtime-requirements.txt"
 $Dest = Join-Path $Root "src-tauri\resources\python-runtime"
@@ -28,7 +58,7 @@ if (Test-Path $Dest) {
 New-Item -ItemType Directory -Path $Dest -Force | Out-Null
 
 $ZipPath = Join-Path ([System.IO.Path]::GetTempPath()) $ZipName
-Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
+Save-RemoteFile -Urls @($ZipUrl) -OutPath $ZipPath
 try {
     Expand-Archive -Path $ZipPath -DestinationPath $Dest -Force
 } finally {
@@ -60,7 +90,12 @@ Set-Content -LiteralPath $pthFile.FullName -Value $pthContent -Encoding ascii
 
 $py = Join-Path $Dest "python.exe"
 $getPip = Join-Path ([System.IO.Path]::GetTempPath()) "get-pip-yapper-tmp.py"
-Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPip -UseBasicParsing
+# bootstrap.pypa.io sometimes fails DNS on locked-down networks; GitHub raw is a common fallback.
+$getPipUrls = @(
+    "https://bootstrap.pypa.io/get-pip.py",
+    "https://raw.githubusercontent.com/pypa/get-pip/main/public/get-pip.py"
+)
+Save-RemoteFile -Urls $getPipUrls -OutPath $getPip
 try {
     & $py $getPip --no-warn-script-location
     if ($LASTEXITCODE -ne 0) {
