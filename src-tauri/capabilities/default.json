@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for Yapper",
+  "windows": ["main", "hud"],
+  "permissions": [
+    "core:default",
+    "core:app:allow-set-app-theme",
+    "dialog:default",
+    "global-shortcut:default"
+  ]
+}

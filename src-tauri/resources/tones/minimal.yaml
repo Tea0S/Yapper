@@ -1,0 +1,6 @@
+name: Minimal
+rules:
+  - pattern: '!'
+    replace: '.'
+  - pattern: '\s+'
+    replace: ' '

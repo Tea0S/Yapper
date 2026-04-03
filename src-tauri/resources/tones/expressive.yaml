@@ -1,0 +1,6 @@
+name: Expressive
+rules:
+  - pattern: '\s+'
+    replace: ' '
+  - pattern: '(\w+)\s*—\s*'
+    replace: '$1 — '
