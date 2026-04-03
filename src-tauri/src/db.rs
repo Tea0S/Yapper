@@ -85,9 +85,14 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
 
     for (k, v) in [
         ("whisper_device", "auto"),
+        ("parakeet_model", "nvidia/parakeet-tdt-0.6b-v3"),
         ("input_device_name", ""),
         ("lazy_load_whisper", "false"),
         ("model_idle_unload_mins", "0"),
+        ("instance_role", "dictation"),
+        ("node_server_bind", "lan"),
+        ("node_server_port", "8765"),
+        ("node_server_token", ""),
     ] {
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
@@ -199,6 +204,134 @@ pub fn list_dictionary(conn: &Connection) -> rusqlite::Result<Vec<DictionaryEntr
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+fn default_dict_export_priority() -> i64 {
+    10
+}
+
+fn default_dict_export_scope() -> String {
+    "word".into()
+}
+
+/// One row in a dictionary import/export file (no DB id — portable across devices).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DictionaryExportItem {
+    pub term: String,
+    pub replacement: String,
+    #[serde(default = "default_dict_export_priority")]
+    pub priority: i64,
+    #[serde(default = "default_dict_export_scope")]
+    pub scope: String,
+}
+
+fn default_dict_file_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DictionaryExportFile {
+    #[serde(default)]
+    pub format: String,
+    #[serde(default = "default_dict_file_version")]
+    pub version: u32,
+    pub dictionary: Vec<DictionaryExportItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum DictionaryImportRoot {
+    File(DictionaryExportFile),
+    List(Vec<DictionaryExportItem>),
+}
+
+impl DictionaryImportRoot {
+    pub fn into_items(self) -> Vec<DictionaryExportItem> {
+        match self {
+            DictionaryImportRoot::File(f) => f.dictionary,
+            DictionaryImportRoot::List(v) => v,
+        }
+    }
+}
+
+/// Returns `(inserted, updated)`.
+pub fn import_dictionary_merge(
+    conn: &Connection,
+    entries: &[DictionaryExportItem],
+) -> rusqlite::Result<(usize, usize)> {
+    let mut inserted = 0usize;
+    let mut updated = 0usize;
+    let tx = conn.unchecked_transaction()?;
+    for e in entries {
+        let term = e.term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        let replacement = e.replacement.trim();
+        let rep = if replacement.is_empty() {
+            term
+        } else {
+            replacement
+        };
+        let scope = if e.scope.trim().is_empty() {
+            "word"
+        } else {
+            e.scope.trim()
+        };
+        let id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM dictionary WHERE term = ?1 AND scope = ?2",
+                params![term, scope],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = id {
+            tx.execute(
+                "UPDATE dictionary SET replacement = ?1, priority = ?2 WHERE id = ?3",
+                params![rep, e.priority, id],
+            )?;
+            updated += 1;
+        } else {
+            tx.execute(
+                "INSERT INTO dictionary (term, replacement, priority, scope) VALUES (?1, ?2, ?3, ?4)",
+                params![term, rep, e.priority, scope],
+            )?;
+            inserted += 1;
+        }
+    }
+    tx.commit()?;
+    Ok((inserted, updated))
+}
+
+pub fn import_dictionary_replace(
+    conn: &Connection,
+    entries: &[DictionaryExportItem],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM dictionary", [])?;
+    for e in entries {
+        let term = e.term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        let replacement = e.replacement.trim();
+        let rep = if replacement.is_empty() {
+            term
+        } else {
+            replacement
+        };
+        let scope = if e.scope.trim().is_empty() {
+            "word"
+        } else {
+            e.scope.trim()
+        };
+        tx.execute(
+            "INSERT INTO dictionary (term, replacement, priority, scope) VALUES (?1, ?2, ?3, ?4)",
+            params![term, rep, e.priority, scope],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

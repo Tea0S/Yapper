@@ -126,8 +126,10 @@
     min-height: 100vh;
     width: 100%;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-end;
+    padding: 4px 6px 10px;
     font-family: "DM Sans", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
   }

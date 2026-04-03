@@ -39,7 +39,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["resources/**/*", "../sidecar/**/*"],
+    "resources": ["resources/**/*", "../sidecar/**/*", "../yapper-node/**/*"],
     "windows": {
       "nsis": {
         "installMode": "currentUser"

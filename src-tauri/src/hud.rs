@@ -6,10 +6,10 @@ use tauri::{
 
 pub const LABEL: &str = "hud";
 
-/// Collapsed “always there” capsule (logical px).
-const SIZE_COLLAPSED: (f64, f64) = (92.0, 34.0);
-/// Expanded meter while dictating / transcribing.
-const SIZE_EXPANDED: (f64, f64) = (268.0, 58.0);
+/// Collapsed “always there” capsule — height fits hover tooltip inside the webview.
+const SIZE_COLLAPSED: (f64, f64) = (112.0, 88.0);
+/// Wider meter while dictating / transcribing (same height so tooltips are not clipped).
+const SIZE_EXPANDED: (f64, f64) = (268.0, 88.0);
 
 fn hud_url(app: &AppHandle) -> Result<Url, String> {
     let main = app

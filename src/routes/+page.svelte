@@ -25,6 +25,24 @@
   type MicLevel = { rms: number; peak: number };
   let micLevel = $state<MicLevel>({ rms: 0, peak: 0 });
 
+  type InstanceRole = "dictation" | "network_server";
+  let instanceRole = $state<InstanceRole>("dictation");
+  type NodeServerStatus = {
+    running: boolean;
+    suggestedClientUrls: string[];
+    port: number;
+    scriptFound: boolean;
+  };
+  let nodeQuick = $state<NodeServerStatus | null>(null);
+
+  async function refreshNodeQuick() {
+    try {
+      nodeQuick = await invoke<NodeServerStatus>("yapper_node_status");
+    } catch {
+      nodeQuick = null;
+    }
+  }
+
   /** Must exceed Rust `wait_ptt_chunk_transcript` + model load (first run can be several minutes). */
   const PTT_STOP_TIMEOUT_MS = 660_000;
 
@@ -55,6 +73,12 @@
 
   onMount(() => {
     refreshStatus();
+    void (async () => {
+      const r =
+        (await invoke<string | null>("get_setting_cmd", { key: "instance_role" })) ?? "dictation";
+      instanceRole = r === "network_server" ? "network_server" : "dictation";
+      await refreshNodeQuick();
+    })();
     const id = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       invoke<MicLevel>("get_mic_input_level")
@@ -68,7 +92,14 @@
         micLevel = l;
       })
       .catch(() => {});
-    return () => clearInterval(id);
+    const nodePoll = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void refreshNodeQuick();
+    }, 3200);
+    return () => {
+      clearInterval(id);
+      clearInterval(nodePoll);
+    };
   });
 
   async function startEngine() {
@@ -163,6 +194,34 @@
 </script>
 
 <section class="hero">
+  {#if instanceRole === "network_server"}
+    <div class="panel server-spotlight" role="region" aria-label="Processing server">
+      <h2 class="server-spotlight-title">This PC is your processing server</h2>
+      <p class="muted server-spotlight-lede">
+        Start the WebSocket bridge here so other Yapper installs can send audio for transcription. Full controls live in
+        Settings.
+      </p>
+      {#if nodeQuick}
+        <p class="server-spotlight-status">
+          <span class="dot" class:on={nodeQuick.running} aria-hidden="true"></span>
+          <span>{nodeQuick.running ? `Listening on port ${nodeQuick.port}` : "Server not running"}</span>
+        </p>
+        {#if nodeQuick.running && nodeQuick.suggestedClientUrls.length}
+          <p class="muted short">Clients connect to:</p>
+          <ul class="server-urls">
+            {#each nodeQuick.suggestedClientUrls as u}
+              <li><code>{u}</code></li>
+            {/each}
+          </ul>
+        {/if}
+        {#if !nodeQuick.scriptFound}
+          <p class="warn">Yapper Node script not found — use a full repo install or set <code>YAPPER_NODE</code>.</p>
+        {/if}
+      {/if}
+      <a class="btn btn-primary" href="/settings#processing-server">Open server setup</a>
+    </div>
+  {/if}
+
   <h1>Speak locally. Stay in control.</h1>
   <p class="lede">
     Yapper runs Whisper-class models on your machine or a <strong>self-hosted</strong> node on
@@ -334,6 +393,48 @@
 <style>
   .hero {
     max-width: 40rem;
+  }
+  .server-spotlight {
+    margin-bottom: 1.5rem;
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-elevated));
+  }
+  .server-spotlight-title {
+    margin: 0 0 0.5rem;
+    font-size: 1.1rem;
+  }
+  .server-spotlight-lede {
+    margin: 0 0 0.75rem;
+    font-size: 0.92rem;
+  }
+  .server-spotlight-status {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0 0 0.5rem;
+    font-size: 0.92rem;
+    font-weight: 600;
+  }
+  .server-urls {
+    margin: 0 0 1rem;
+    padding-left: 1.1rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  .server-urls code {
+    font-size: 0.82rem;
+    word-break: break-all;
+  }
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .dot.on {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
   }
   h1 {
     font-size: clamp(1.85rem, 4vw, 2.35rem);

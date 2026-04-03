@@ -1,5 +1,6 @@
 mod audio;
 mod db;
+mod global_shortcuts;
 mod hud;
 mod nvidia_libs;
 mod paths;
@@ -9,11 +10,14 @@ mod remote_engine;
 mod sidecar;
 mod state;
 mod trace_log;
+mod node_server;
 
 use crate::db::{
-    check_keybind_conflicts, get_setting, list_corrections, list_dictionary, list_keybinds,
-    load_corrections_for_postprocess, load_dictionary_for_postprocess, set_keybind, set_setting,
-    upsert_correction, upsert_dictionary, CorrectionEntry, DictionaryEntry, KeybindRow,
+    check_keybind_conflicts, get_setting, import_dictionary_merge, import_dictionary_replace,
+    list_corrections, list_dictionary, list_keybinds, load_corrections_for_postprocess,
+    load_dictionary_for_postprocess, set_keybind, set_setting, upsert_correction, upsert_dictionary,
+    CorrectionEntry, DictionaryEntry, DictionaryExportFile, DictionaryExportItem, DictionaryImportRoot,
+    KeybindRow,
 };
 use crate::paths::{db_path, model_cache_dir, sidecar_script_path};
 use crate::sidecar::{
@@ -86,6 +90,16 @@ fn whisper_decode_options_from_db(conn: &rusqlite::Connection) -> WhisperDecodeO
         language: s("whisper_language", ""),
         vad_filter_pcm: truthy("whisper_vad_filter_pcm", false),
         vad_filter_file: truthy("whisper_vad_filter_file", true),
+    }
+}
+
+fn inference_model_for_init(conn: &rusqlite::Connection) -> rusqlite::Result<String> {
+    let engine = get_setting(conn, "engine")?.unwrap_or_else(|| "whisper".into());
+    if engine == "parakeet" {
+        Ok(get_setting(conn, "parakeet_model")?
+            .unwrap_or_else(|| "nvidia/parakeet-tdt-0.6b-v3".into()))
+    } else {
+        Ok(get_setting(conn, "whisper_model")?.unwrap_or_else(|| "base".into()))
     }
 }
 use tauri::{Emitter, Manager, State};
@@ -306,7 +320,7 @@ async fn poll_local_ready_metadata(state: &AppState) {
     }
 }
 
-fn open_db(app: &tauri::AppHandle) -> Result<rusqlite::Connection, String> {
+pub(crate) fn open_db(app: &tauri::AppHandle) -> Result<rusqlite::Connection, String> {
     let p = db_path(app)?;
     db::open(&p).map_err(|e| e.to_string())
 }
@@ -389,7 +403,13 @@ fn set_keybind_cmd(
         return Ok(conflicts);
     }
     set_keybind(&conn, &action, &shortcut).map_err(|e| e.to_string())?;
+    let _ = global_shortcuts::refresh(&app);
     Ok(vec![])
+}
+
+#[tauri::command]
+fn refresh_global_shortcuts(app: tauri::AppHandle) -> Result<String, String> {
+    global_shortcuts::refresh(&app)
 }
 
 #[tauri::command]
@@ -408,6 +428,62 @@ fn upsert_dictionary_cmd(app: tauri::AppHandle, entry: DictionaryEntry) -> Resul
 fn delete_dictionary_cmd(app: tauri::AppHandle, id: i64) -> Result<(), String> {
     let conn = open_db(&app)?;
     db::delete_dictionary(&conn, id).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+struct DictionaryImportSummary {
+    inserted: usize,
+    updated: usize,
+}
+
+#[tauri::command]
+fn export_dictionary_to_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let rows = list_dictionary(&conn).map_err(|e| e.to_string())?;
+    let file = DictionaryExportFile {
+        format: "yapper-dictionary".into(),
+        version: 1,
+        dictionary: rows
+            .into_iter()
+            .map(|e| DictionaryExportItem {
+                term: e.term,
+                replacement: e.replacement,
+                priority: e.priority,
+                scope: e.scope,
+            })
+            .collect(),
+    };
+    let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn import_dictionary_from_path(
+    app: tauri::AppHandle,
+    path: String,
+    replace: bool,
+) -> Result<DictionaryImportSummary, String> {
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let root: DictionaryImportRoot =
+        serde_json::from_str(&text).map_err(|e| format!("Invalid dictionary file: {e}"))?;
+    let items = root.into_items();
+    if items.is_empty() {
+        return Err("File contains no dictionary entries.".into());
+    }
+    let conn = open_db(&app)?;
+    if replace {
+        import_dictionary_replace(&conn, &items).map_err(|e| e.to_string())?;
+        let inserted = items.iter().filter(|e| !e.term.trim().is_empty()).count();
+        Ok(DictionaryImportSummary {
+            inserted,
+            updated: 0,
+        })
+    } else {
+        let (inserted, updated) =
+            import_dictionary_merge(&conn, &items).map_err(|e| e.to_string())?;
+        Ok(DictionaryImportSummary { inserted, updated })
+    }
 }
 
 #[tauri::command]
@@ -495,9 +571,7 @@ async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
         let bridge = remote_engine::spawn_remote(&url, &token).await?;
-        let model = get_setting(&conn, "whisper_model")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| "base".into());
+        let model = inference_model_for_init(&conn).map_err(|e| e.to_string())?;
         let compute = get_setting(&conn, "compute_type")
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| "int8".into());
@@ -554,9 +628,7 @@ async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         ..Default::default()
     });
     let session = SidecarSession::spawn(&py, script, sidecar_env).await?;
-    let model = get_setting(&conn, "whisper_model")
-        .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| "base".into());
+    let model = inference_model_for_init(&conn).map_err(|e| e.to_string())?;
     let compute = get_setting(&conn, "compute_type")
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| "int8".into());
@@ -757,10 +829,9 @@ async fn wait_ptt_chunk_transcript(
     }
 }
 
-#[tauri::command]
-async fn ptt_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub(crate) async fn ptt_start_inner(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
     ptt_log("ptt_start: begin");
-    let conn = open_db(&app)?;
+    let conn = open_db(app)?;
     let device_name = get_setting(&conn, "input_device_name")
         .map_err(|e| e.to_string())?
         .map(|s| s.trim().to_string())
@@ -770,16 +841,16 @@ async fn ptt_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
         .await
         .map_err(|e| e.to_string())??;
     state.ptt_session_active.store(true, Ordering::SeqCst);
-    touch_model_activity(&state);
+    touch_model_activity(state);
     ptt_log("ptt_start: capture started");
     {
         let mut g = state.hud_phase.lock().map_err(|e| e.to_string())?;
         *g = HudPhase::Listening;
     }
-    if hud::set_expanded(&app, true).is_err() {
-        let _ = hud::ensure_collapsed_visible(&app);
+    if hud::set_expanded(app, true).is_err() {
+        let _ = hud::ensure_collapsed_visible(app);
     }
-    if let Err(e) = hud::set_expanded(&app, true) {
+    if let Err(e) = hud::set_expanded(app, true) {
         if let Ok(mut g) = state.hud_phase.lock() {
             *g = HudPhase::Idle;
         }
@@ -792,7 +863,11 @@ async fn ptt_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-async fn ptt_stop(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+async fn ptt_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    ptt_start_inner(&app, &state).await
+}
+
+pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> Result<String, String> {
     ptt_log("ptt_stop: begin");
     let _hud_collapse = hud::HudCollapseAfterPtt::new(&app);
     {
@@ -1017,8 +1092,13 @@ async fn ptt_stop(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
     ));
     *state.last_transcript.lock().await = combined.clone();
     let _ = app.emit("transcript", combined.clone());
-    touch_model_activity(&state);
+    touch_model_activity(state);
     Ok(combined)
+}
+
+#[tauri::command]
+async fn ptt_stop(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    ptt_stop_inner(&app, &state).await
 }
 
 #[tauri::command]
@@ -1181,6 +1261,8 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            let _ = global_shortcuts::refresh(&handle);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1189,9 +1271,12 @@ pub fn run() {
             set_setting_cmd,
             list_keybinds_cmd,
             set_keybind_cmd,
+            refresh_global_shortcuts,
             list_dictionary_cmd,
             upsert_dictionary_cmd,
             delete_dictionary_cmd,
+            export_dictionary_to_path,
+            import_dictionary_from_path,
             list_corrections_cmd,
             upsert_correction_cmd,
             delete_correction_cmd,
@@ -1208,6 +1293,9 @@ pub fn run() {
             install_nvidia_whisper_libs,
             hud_snapshot,
             focus_main_window,
+            node_server::yapper_node_status,
+            node_server::yapper_node_start,
+            node_server::yapper_node_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

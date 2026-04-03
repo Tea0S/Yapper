@@ -50,3 +50,34 @@ pub fn sidecar_script_path(app: &tauri::AppHandle) -> PathBuf {
         .map(|p| p.join("sidecar").join("server.py"))
         .unwrap_or_else(|| PathBuf::from("sidecar/server.py"))
 }
+
+/// Resolves `yapper-node/main.py` for dev, next to the exe, or bundled under resources.
+pub fn yapper_node_main_path(app: &tauri::AppHandle) -> PathBuf {
+    if let Ok(p) = std::env::var("YAPPER_NODE") {
+        return PathBuf::from(p);
+    }
+    if cfg!(debug_assertions) {
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("yapper-node")
+            .join("main.py");
+    }
+    if let Ok(mut exe) = std::env::current_exe() {
+        exe.pop();
+        let next_to_exe = exe.join("yapper-node").join("main.py");
+        if next_to_exe.is_file() {
+            return next_to_exe;
+        }
+    }
+    if let Ok(res) = app.path().resource_dir() {
+        let bundled = res.join("yapper-node").join("main.py");
+        if bundled.is_file() {
+            return bundled;
+        }
+    }
+    std::env::current_exe()
+        .unwrap_or_default()
+        .parent()
+        .map(|p| p.join("yapper-node").join("main.py"))
+        .unwrap_or_else(|| PathBuf::from("yapper-node/main.py"))
+}

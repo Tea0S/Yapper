@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { afterNavigate } from "$app/navigation";
   import { onMount } from "svelte";
   import { createShortcutCaptureSession } from "$lib/keybindCapture";
   import { bindYapperShortcuts } from "$lib/shortcuts";
@@ -9,6 +10,11 @@
     persistUiTheme,
     type UiTheme,
   } from "$lib/theme";
+  import {
+    DEFAULT_PARAKEET_MODEL,
+    PARAKEET_MODEL_OPTIONS,
+    parakeetDiskMb,
+  } from "$lib/parakeetModelInfo";
   import {
     formatStorageMb,
     whisperDiskMb,
@@ -22,11 +28,32 @@
   }
 
   let uiTheme = $state<UiTheme>("system");
+  type InstanceRole = "dictation" | "network_server";
+  let instanceRole = $state<InstanceRole>("dictation");
+  let nodeServerBind = $state<"lan" | "loopback">("lan");
+  let nodeServerPort = $state("8765");
+  let nodeServerToken = $state("");
+  type NodeServerStatus = {
+    running: boolean;
+    bindMode: string;
+    bindHost: string;
+    port: number;
+    tokenConfigured: boolean;
+    suggestedClientUrls: string[];
+    logTail: string[];
+    scriptFound: boolean;
+    scriptPath: string;
+  };
+  let nodeStatus = $state<NodeServerStatus | null>(null);
+  let nodeActionBusy = $state(false);
+  let nodeActionErr = $state<string | null>(null);
+
   let inferenceHost = $state("local");
   let remoteUrl = $state("ws://127.0.0.1:8765");
   let remoteToken = $state("");
   let engine = $state("whisper");
   let whisperModel = $state("base");
+  let parakeetModel = $state(DEFAULT_PARAKEET_MODEL);
   let computeType = $state("int8");
   let tonePreset = $state("standard");
   let mock = $state(false);
@@ -125,6 +152,14 @@
     whisperModel =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_model" })) ??
       "base";
+    {
+      const pk =
+        (await invoke<string | null>("get_setting_cmd", { key: "parakeet_model" })) ??
+        DEFAULT_PARAKEET_MODEL;
+      parakeetModel = PARAKEET_MODEL_OPTIONS.some((o) => o.id === pk)
+        ? pk
+        : DEFAULT_PARAKEET_MODEL;
+    }
     computeType =
       (await invoke<string | null>("get_setting_cmd", { key: "compute_type" })) ??
       "int8";
@@ -204,9 +239,122 @@
       if (b.action === "toggle_open_mic") kMic = b.shortcut;
       if (b.action === "stop_dictation") kStop = b.shortcut;
     }
+
+    const role =
+      (await invoke<string | null>("get_setting_cmd", { key: "instance_role" })) ?? "dictation";
+    instanceRole = role === "network_server" ? "network_server" : "dictation";
+    const bind =
+      (await invoke<string | null>("get_setting_cmd", { key: "node_server_bind" })) ?? "lan";
+    nodeServerBind = bind === "loopback" ? "loopback" : "lan";
+    nodeServerPort =
+      (await invoke<string | null>("get_setting_cmd", { key: "node_server_port" })) ?? "8765";
+    nodeServerToken =
+      (await invoke<string | null>("get_setting_cmd", { key: "node_server_token" })) ?? "";
+
+    if (instanceRole === "network_server") {
+      await refreshNodeStatus();
+    } else {
+      nodeStatus = null;
+    }
   }
 
-  onMount(load);
+  async function refreshNodeStatus() {
+    try {
+      nodeStatus = await invoke<NodeServerStatus>("yapper_node_status");
+    } catch {
+      nodeStatus = null;
+    }
+  }
+
+  async function setInstanceRole(next: InstanceRole) {
+    instanceRole = next;
+    try {
+      await invoke("set_setting_cmd", {
+        key: "instance_role",
+        value: next,
+      });
+    } catch (e) {
+      nodeActionErr = String(e);
+    }
+    if (next === "network_server") {
+      await refreshNodeStatus();
+    } else {
+      nodeStatus = null;
+      nodeActionErr = null;
+    }
+  }
+
+  function generateNodeToken() {
+    const a = new Uint8Array(16);
+    crypto.getRandomValues(a);
+    nodeServerToken = [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function saveNodeServerConfig() {
+    nodeActionErr = null;
+    await invoke("set_setting_cmd", {
+      key: "node_server_bind",
+      value: nodeServerBind,
+    });
+    await invoke("set_setting_cmd", { key: "node_server_port", value: nodeServerPort.trim() });
+    await invoke("set_setting_cmd", {
+      key: "node_server_token",
+      value: nodeServerToken,
+    });
+    await refreshNodeStatus();
+  }
+
+  async function startProcessingServer() {
+    nodeActionBusy = true;
+    nodeActionErr = null;
+    try {
+      await saveNodeServerConfig();
+      nodeStatus = await invoke<NodeServerStatus>("yapper_node_start");
+    } catch (e) {
+      nodeActionErr = String(e);
+      await refreshNodeStatus();
+    } finally {
+      nodeActionBusy = false;
+    }
+  }
+
+  async function stopProcessingServer() {
+    nodeActionBusy = true;
+    nodeActionErr = null;
+    try {
+      nodeStatus = await invoke<NodeServerStatus>("yapper_node_stop");
+    } catch (e) {
+      nodeActionErr = String(e);
+    } finally {
+      nodeActionBusy = false;
+    }
+  }
+
+  async function copyText(t: string) {
+    try {
+      await navigator.clipboard.writeText(t);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  onMount(() => {
+    void load();
+  });
+
+  $effect(() => {
+    if (typeof window === "undefined") return;
+    if (instanceRole !== "network_server") return;
+    const poll = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void refreshNodeStatus();
+    }, 2800);
+    return () => window.clearInterval(poll);
+  });
+
+  afterNavigate(({ to }) => {
+    if (to?.url.pathname === "/settings") void load();
+  });
 
   async function refreshModelCacheDiagnostic() {
     cacheDiagnosticText = "Loading…";
@@ -234,6 +382,7 @@
     await invoke("set_setting_cmd", { key: "remote_token", value: remoteToken });
     await invoke("set_setting_cmd", { key: "engine", value: engine });
     await invoke("set_setting_cmd", { key: "whisper_model", value: whisperModel });
+    await invoke("set_setting_cmd", { key: "parakeet_model", value: parakeetModel });
     await invoke("set_setting_cmd", { key: "compute_type", value: computeType });
     await invoke("set_setting_cmd", { key: "tone_preset", value: tonePreset });
     await invoke("set_setting_cmd", {
@@ -370,7 +519,123 @@
     </div>
   </div>
 
-  <div class="panel block">
+  <div class="panel block" id="instance-role">
+    <h2>This installation</h2>
+    <p class="muted short">
+      Say whether this PC is mainly for <strong>dictating here</strong> or for <strong>running models for other
+      Yapper installs</strong> on your LAN or VPN. You can still use both; this only changes emphasis in the app.
+    </p>
+    <div class="theme-toggle" role="group" aria-label="Primary use of this PC">
+      <button
+        type="button"
+        class="theme-seg"
+        class:active={instanceRole === "dictation"}
+        onclick={() => setInstanceRole("dictation")}>Dictation on this PC</button>
+      <button
+        type="button"
+        class="theme-seg"
+        class:active={instanceRole === "network_server"}
+        onclick={() => setInstanceRole("network_server")}>Network processing server</button>
+    </div>
+  </div>
+
+  {#if instanceRole === "network_server"}
+  <div class="panel block" id="processing-server">
+    <h2>Network processing server (Yapper Node)</h2>
+    <p class="muted short">
+      Turn this PC into a WebSocket server other Yapper installs can connect to (Settings → Speech engine → “Another
+      computer”). Uses the same Python stack as the local sidecar: run
+      <code>pip install -r yapper-node/requirements.txt</code>
+      once. Prefer Tailscale or another VPN; do not expose the port to the public internet without TLS and auth you trust.
+    </p>
+    {#if nodeStatus && !nodeStatus.scriptFound}
+      <p class="warn" role="alert">
+        Yapper Node script was not found at the expected path. Use a full repo checkout, or set the
+        <code>YAPPER_NODE</code> environment variable to <code>main.py</code>.
+      </p>
+      <p class="muted short mono-p">{nodeStatus.scriptPath}</p>
+    {/if}
+    <div class="field">
+      <label for="ns-bind">Listen on</label>
+      <select id="ns-bind" bind:value={nodeServerBind} disabled={nodeStatus?.running ?? false}>
+        <option value="lan">All interfaces (LAN / VPN — other PCs can connect)</option>
+        <option value="loopback">This PC only (127.0.0.1 — testing)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="ns-port">Port</label>
+      <input
+        id="ns-port"
+        type="text"
+        bind:value={nodeServerPort}
+        inputmode="numeric"
+        autocomplete="off"
+        disabled={nodeStatus?.running ?? false}
+      />
+    </div>
+    <div class="field">
+      <label for="ns-tok">Server password (shared secret)</label>
+      <div class="token-row">
+        <input id="ns-tok" type="password" bind:value={nodeServerToken} autocomplete="off" />
+        <button type="button" class="btn" onclick={generateNodeToken}>Generate</button>
+      </div>
+      <p class="field-hint">Clients enter the same value under “Password” when connecting to this server.</p>
+    </div>
+    <button
+      type="button"
+      class="btn"
+      disabled={nodeStatus?.running ?? false}
+      onclick={saveNodeServerConfig}>Save server settings</button>
+    <div class="node-actions">
+      {#if nodeStatus?.running}
+        <button
+          type="button"
+          class="btn btn-stop"
+          disabled={nodeActionBusy}
+          onclick={stopProcessingServer}>{nodeActionBusy ? "Stopping…" : "Stop processing server"}</button>
+      {:else}
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={nodeActionBusy || !nodeServerToken.trim()}
+          onclick={startProcessingServer}>{nodeActionBusy ? "Starting…" : "Start processing server"}</button>
+      {/if}
+    </div>
+    {#if nodeActionErr}
+      <p class="warn" role="alert">{nodeActionErr}</p>
+    {/if}
+    {#if nodeStatus}
+      <div class="node-status" role="status">
+        <p class="node-status-line">
+          <span class="dot" class:on={nodeStatus.running} aria-hidden="true"></span>
+          <strong>{nodeStatus.running ? "Server running" : "Server stopped"}</strong>
+          {#if nodeStatus.running}
+            <span class="muted">· port {nodeStatus.port}</span>
+          {/if}
+        </p>
+        {#if nodeStatus.running && nodeStatus.suggestedClientUrls.length}
+          <p class="muted short">On other machines, set <em>Server address</em> to one of:</p>
+          <ul class="url-list">
+            {#each nodeStatus.suggestedClientUrls as u}
+              <li>
+                <code class="ws-url">{u}</code>
+                <button type="button" class="btn btn-tiny" onclick={() => copyText(u)}>Copy</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if nodeStatus.logTail.length}
+          <details class="node-log">
+            <summary>Recent log</summary>
+            <pre class="node-log-pre">{nodeStatus.logTail.join("\n")}</pre>
+          </details>
+        {/if}
+      </div>
+    {/if}
+  </div>
+  {/if}
+
+  <div class="panel block" id="inference-host">
     <h2>Speech engine</h2>
     <div class="field">
       <label for="host">Where transcription runs</label>
@@ -400,20 +665,39 @@
       <p class="note">Parakeet needs an NVIDIA GPU. Whisper works on CPU or NVIDIA.</p>
     {/if}
     <div class="field">
-      <label for="wm">Model size</label>
-      <select id="wm" bind:value={whisperModel}>
-        {#each WHISPER_MODEL_OPTIONS as m}
-          <option value={m.id}>
-            {m.line} — {formatStorageMb(whisperDiskMb(m.id))} on disk
-          </option>
-        {/each}
-      </select>
-      <p class="field-hint">
-        One-time download into the app cache. Size is the same for int8, float16, and float32 — only speed and memory
-        while running change.
-      </p>
+      {#if engine === "whisper"}
+        <label for="wm">Model size</label>
+        <select id="wm" bind:value={whisperModel}>
+          {#each WHISPER_MODEL_OPTIONS as m}
+            <option value={m.id}>
+              {m.line} — {formatStorageMb(whisperDiskMb(m.id))} on disk
+            </option>
+          {/each}
+        </select>
+        <p class="field-hint">
+          One-time download into the app cache. Size is the same for int8, float16, and float32 — only speed and memory
+          while running change.
+        </p>
+      {:else}
+        <label for="wm-pk">Model</label>
+        <select id="wm-pk" bind:value={parakeetModel}>
+          {#each PARAKEET_MODEL_OPTIONS as m}
+            <option value={m.id}>
+              {m.line} — {formatStorageMb(parakeetDiskMb(m.id))} on disk
+            </option>
+          {/each}
+        </select>
+        <p class="field-hint">
+          English checkpoints from Hugging Face; first load downloads weights (sizes are approximate). NeMo + CUDA
+          required on the inference host.
+        </p>
+      {/if}
     </div>
-    <p class="note">First use downloads the model; Wi‑Fi helps for larger sizes.</p>
+    {#if engine === "whisper"}
+      <p class="note">First use downloads the model; Wi‑Fi helps for larger sizes.</p>
+    {:else}
+      <p class="note">First use downloads the checkpoint; Wi‑Fi helps for the larger options.</p>
+    {/if}
     <label class="check">
       <input type="checkbox" bind:checked={lazyLoadWhisper} />
       Load the model only when needed (saves memory; first use may pause briefly)
@@ -430,19 +714,21 @@
       </select>
     </div>
     <p class="note">After idle timeout, the model unloads from RAM. The next session loads from disk again (no new download).</p>
-    <div class="field">
-      <label for="ct">Number format (speed vs. precision)</label>
-      <select id="ct" bind:value={computeType}>
-        <option value="int8">int8 — smallest memory, fastest</option>
-        <option value="float16">float16 — middle ground</option>
-        <option value="float32">float32 — largest memory, highest precision</option>
-      </select>
-      <p class="field-hint">
-        Rough memory while loaded (model + format): {formatStorageMb(
-          whisperRuntimeMbHint(whisperModel, computeType),
-        )} — ballpark only; real use depends on GPU drivers and batching.
-      </p>
-    </div>
+    {#if engine === "whisper"}
+      <div class="field">
+        <label for="ct">Number format (speed vs. precision)</label>
+        <select id="ct" bind:value={computeType}>
+          <option value="int8">int8 — smallest memory, fastest</option>
+          <option value="float16">float16 — middle ground</option>
+          <option value="float32">float32 — largest memory, highest precision</option>
+        </select>
+        <p class="field-hint">
+          Rough memory while loaded (model + format): {formatStorageMb(
+            whisperRuntimeMbHint(whisperModel, computeType),
+          )} — ballpark only; real use depends on GPU drivers and batching.
+        </p>
+      </div>
+    {/if}
     <div class="field">
       <label for="wd">Processor</label>
       <select id="wd" bind:value={whisperDevice}>
@@ -1024,5 +1310,92 @@
   }
   .panel a {
     color: var(--accent);
+  }
+  .token-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .token-row input {
+    flex: 1;
+    min-width: 10rem;
+  }
+  .node-actions {
+    margin: 1rem 0 0.5rem;
+  }
+  .node-status-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.6rem;
+    margin: 0.75rem 0 0.25rem;
+  }
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .dot.on {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .url-list {
+    margin: 0.35rem 0 0;
+    padding-left: 1.1rem;
+    font-size: 0.88rem;
+    color: var(--text-muted);
+  }
+  .url-list li {
+    margin-bottom: 0.35rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .ws-url {
+    font-size: 0.82rem;
+    word-break: break-all;
+  }
+  .btn-tiny {
+    font-size: 0.78rem;
+    padding: 0.25rem 0.5rem;
+  }
+  .node-log {
+    margin-top: 0.75rem;
+  }
+  .node-log summary {
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 0.88rem;
+    font-weight: 600;
+  }
+  .node-log-pre {
+    margin-top: 0.5rem;
+    padding: 0.55rem 0.65rem;
+    font-size: 0.75rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-height: 12rem;
+    overflow: auto;
+  }
+  .mono-p {
+    font-family: ui-monospace, monospace;
+    font-size: 0.78rem;
+    word-break: break-all;
+  }
+  .btn-stop {
+    background: color-mix(in srgb, var(--danger) 18%, var(--bg-elevated));
+    border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+    color: var(--text);
+  }
+  .btn-stop:hover:not(:disabled) {
+    border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 28%, var(--bg-elevated));
   }
 </style>

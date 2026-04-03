@@ -1,9 +1,9 @@
 [package]
 name = "yapper"
-version = "0.1.0"
+version = "1.0.0"
 description = "Yapper — local-first dictation"
-authors = ["Yapper"]
-edition = "2021"
+authors = ["Tea"]
+edition = "2025"
 
 [lib]
 name = "yapper_lib"
@@ -33,3 +33,4 @@ ureq = { version = "2", default-features = true }
 sevenz-rust = "0.6"
 rubato = "2.0.0"
 audioadapter-buffers = "3"
+local-ip-address = "0.6"

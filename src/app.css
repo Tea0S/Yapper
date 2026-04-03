@@ -6,8 +6,8 @@
   --border: #2a323c;
   --text: #e8edf4;
   --text-muted: #8b98a8;
-  --accent: #3dd6c3;
-  --accent-dim: #2a9d8f;
+  --accent: #ffc0b4;
+  --accent-dim: #d9a090;
   --danger: #f07178;
   --radius: 12px;
   --font-display: "Fraunces", Georgia, serif;
@@ -20,8 +20,8 @@
   --border: #d9d4cc;
   --text: #1a1d21;
   --text-muted: #5c6570;
-  --accent: #0d7a6e;
-  --accent-dim: #0a5c53;
+  --accent: #ffc0b4;
+  --accent-dim: #c48a7a;
   --danger: #b83232;
 }
 
@@ -32,8 +32,8 @@
     --border: #d9d4cc;
     --text: #1a1d21;
     --text-muted: #5c6570;
-    --accent: #0d7a6e;
-    --accent-dim: #0a5c53;
+    --accent: #ffc0b4;
+    --accent-dim: #c48a7a;
     --danger: #b83232;
   }
 }
@@ -109,7 +109,7 @@ button {
 .btn-primary {
   background: linear-gradient(135deg, var(--accent), var(--accent-dim));
   border-color: transparent;
-  color: #04120f;
+  color: #1e1412;
 }
 .btn-primary:hover {
   filter: brightness(1.05);

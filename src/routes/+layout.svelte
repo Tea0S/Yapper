@@ -2,7 +2,9 @@
   import "../app.css";
   import { onMount } from "svelte";
   import { unregisterAll } from "@tauri-apps/plugin-global-shortcut";
+  import { afterNavigate } from "$app/navigation";
   import { page } from "$app/stores";
+  import { invoke } from "@tauri-apps/api/core";
   import { bindYapperShortcuts } from "$lib/shortcuts";
   import { applyUiTheme, loadUiTheme } from "$lib/theme";
 
@@ -12,6 +14,18 @@
   let { children }: Props = $props();
 
   let status = $state("");
+  /** Sidebar hint: how this install is primarily used */
+  let instanceTag = $state("this device");
+
+  async function loadInstanceTag() {
+    try {
+      const role =
+        (await invoke<string | null>("get_setting_cmd", { key: "instance_role" })) ?? "dictation";
+      instanceTag = role === "network_server" ? "network host" : "this device";
+    } catch {
+      instanceTag = "this device";
+    }
+  }
 
   const nav = [
     { href: "/", label: "Home" },
@@ -22,6 +36,7 @@
 
   onMount(() => {
     let cancelled = false;
+    void loadInstanceTag();
     void (async () => {
       const mode = await loadUiTheme();
       if (!cancelled) applyUiTheme(mode);
@@ -46,6 +61,10 @@
       void unregisterAll();
     };
   });
+
+  afterNavigate(({ from }) => {
+    if (from?.url.pathname === "/settings") void loadInstanceTag();
+  });
 </script>
 
 {#if $page.url.pathname === "/hud"}
@@ -57,7 +76,7 @@
       <span class="mark">◆</span>
       <div>
         <div class="name">Yapper</div>
-        <div class="tag">local dictation</div>
+        <div class="tag">{instanceTag}</div>
       </div>
     </div>
     <nav>

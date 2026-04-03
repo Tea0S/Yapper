@@ -8,3 +8,19 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Python (sidecar / yapper-node)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+*.egg
+
+# OS / editor (optional; remove if you want these shared)
+Thumbs.db

@@ -3,9 +3,12 @@ use crate::remote_engine::RemoteBridge;
 use crate::sidecar::SidecarSession;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
+use tauri::async_runtime::JoinHandle;
+use tokio::process::Child;
 use tokio::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +45,11 @@ pub struct AppState {
     pub inference_busy: Arc<AtomicBool>,
     /// Push-to-talk overlay (`hud` window) — polled by the HUD webview.
     pub hud_phase: std::sync::Mutex<HudPhase>,
+    /// Latest `ptt_start` task started by the global shortcut handler (release awaits it).
+    pub ptt_hotkey_start_pending: Arc<StdMutex<Option<JoinHandle<Result<(), String>>>>>,
+    /// Optional Yapper Node WebSocket server (`yapper-node/main.py`).
+    pub yapper_node: Arc<Mutex<Option<Child>>>,
+    pub yapper_node_logs: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl AppState {
@@ -60,6 +68,9 @@ impl AppState {
             ptt_session_active: Arc::new(AtomicBool::new(false)),
             inference_busy: Arc::new(AtomicBool::new(false)),
             hud_phase: std::sync::Mutex::new(HudPhase::Hidden),
+            ptt_hotkey_start_pending: Arc::new(StdMutex::new(None)),
+            yapper_node: Arc::new(Mutex::new(None)),
+            yapper_node_logs: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 }
