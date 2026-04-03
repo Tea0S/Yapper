@@ -21,7 +21,7 @@ use crate::db::{
 };
 use crate::paths::{db_path, model_cache_dir, sidecar_script_path};
 use crate::sidecar::{
-    default_python, pop_sidecar_transcript_for_seq, SidecarIn, SidecarOut, SidecarSession,
+    pop_sidecar_transcript_for_seq, python_executable, SidecarIn, SidecarOut, SidecarSession,
     SidecarSpawnEnv, WhisperDecodeOptions,
 };
 use crate::state::{next_seq, AppState, HudPhase};
@@ -616,7 +616,7 @@ async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     }
 
     let script = sidecar_script_path(&app);
-    let py = default_python();
+    let py = python_executable(&app);
     #[cfg(target_os = "windows")]
     let sidecar_env = nvidia_libs::windows_bin_dir(&app).map(|bin| SidecarSpawnEnv {
         path_prepend_windows: Some(bin),

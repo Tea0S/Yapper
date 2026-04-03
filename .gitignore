@@ -24,3 +24,6 @@ dist/
 
 # OS / editor (optional; remove if you want these shared)
 Thumbs.db
+
+# Windows embeddable runtime (run scripts/bundle-windows-python-runtime.ps1 before release build)
+src-tauri/resources/python-runtime/

@@ -1,5 +1,5 @@
 //! One-click install of NVIDIA runtime libraries for faster-whisper / CTranslate2 (CUDA 12 + cuDNN 9).
-use crate::sidecar::default_python;
+use crate::sidecar::python_executable;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
@@ -154,7 +154,7 @@ print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + os.path.dirname(nvidia
 }
 
 fn install_linux(app: &tauri::AppHandle) -> Result<String, String> {
-    let py = default_python();
+    let py = python_executable(app);
     let mut log = String::new();
     let pip = std::process::Command::new(&py)
         .args([

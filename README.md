@@ -6,11 +6,13 @@ Windows-first desktop dictation: **Whisper** (via [faster-whisper](https://githu
 
 - [Rust](https://rustup.rs/) and [Node.js](https://nodejs.org/) (for Tauri 2 + SvelteKit)
 - **Windows:** [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (Desktop development with C++ / MSVC) — required to compile the Tauri/Rust backend.
-- Python 3.10+ with sidecar dependencies:
+- For **local dev without a bundled runtime:** Python 3.10+ on `PATH` / `py` launcher, with:
 
 ```bash
 pip install -r sidecar/requirements.txt
 ```
+
+Release installers that include **no separate Python install** are built with `npm run pack:release` (bundles an embeddable CPython + deps under `src-tauri/resources/python-runtime/`; folder is gitignored).
 
 ### `program not found` / `cargo metadata` failed
 
@@ -73,11 +75,13 @@ Tauri and `cpal` build on Linux; global shortcuts and paste-to-focused-window ne
 ## Windows installer (packaged app)
 
 ```bash
-npm run pack
+npm run pack:release
 ```
 
-Same as `npm run tauri build`. Installers are written to `src-tauri/target/release/bundle/` (typically an **NSIS** `.exe` setup and an **MSI**). NSIS is configured for **per-user** install (no admin) by default.
+Runs `scripts/bundle-windows-python-runtime.ps1` (one-time download: embeddable Python + `pip install` for sidecar and Yapper Node), then `tauri build`. Installers land in `src-tauri/target/release/bundle/` (typically **NSIS** `.exe` and **MSI**). NSIS defaults to **per-user** install (no admin).
 
-**End users today:** the GUI is fully packaged; **local inference** still expects [Python](https://www.python.org/downloads/) and `pip install -r sidecar/requirements.txt` unless you ship a bundled sidecar (see below).
+For a quick build **without** embedding Python (dev machine only), use `npm run pack` and keep system Python + `pip install -r sidecar/requirements.txt`.
 
-**Roadmap for “download and run”:** embed a Python runtime or a frozen `server.exe` next to Yapper, add **code signing** to avoid SmartScreen warnings, then host installers on **GitHub Releases** or **winget**. See [docs/distribution.md](docs/distribution.md) for a concrete checklist.
+**End users of a `pack:release` build:** no Python install required for local dictation or in-app Yapper Node. The first Whisper model still downloads to the app cache on use (can be large). **Visual C++ Redistributable** is usually already present on Windows; install it if import errors mention missing `VCRUNTIME`.
+
+**Still recommended for public downloads:** code signing (SmartScreen), then **GitHub Releases** / **winget**. See [docs/distribution.md](docs/distribution.md).

@@ -11,7 +11,9 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
+    "bundle:python": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-windows-python-runtime.ps1",
     "pack": "tauri build",
+    "pack:release": "npm run bundle:python && npm run pack",
     "pack:debug": "tauri build --debug"
   },
   "license": "MIT",

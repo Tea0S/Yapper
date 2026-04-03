@@ -3,7 +3,7 @@ name = "yapper"
 version = "1.0.0"
 description = "Yapper — local-first dictation"
 authors = ["Tea"]
-edition = "2025"
+edition = "2021"
 
 [lib]
 name = "yapper_lib"

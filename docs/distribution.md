@@ -1,10 +1,11 @@
 # Distribution: easy download & install
 
-Goal: a **single downloadable installer** (or store listing) so users never touch Rust or Node.
+Goal: a **single downloadable installer** so end users never install Python or run `pip` themselves.
 
-## What you ship today (`npm run tauri build`)
+## Release build (`npm run pack:release`)
 
-Tauri produces Windows artifacts under:
+1. **`npm run bundle:python`** — PowerShell script downloads Windows **embeddable CPython** (see `scripts/bundle-windows-python-runtime.ps1`), bootstraps **pip**, and installs merged deps from `scripts/python-runtime-requirements.txt` (sidecar + Yapper Node) into **`src-tauri/resources/python-runtime/`** (gitignored, not committed).
+2. **`npm run pack`** — `tauri build` bundles that folder via `resources/**/*` and produces installers under:
 
 `src-tauri/target/release/bundle/`
 
@@ -15,23 +16,23 @@ Typical outputs:
 
 Install scope defaults to **current user** (no admin) in `tauri.conf.json` unless you change `bundle.windows.nsis.installMode`.
 
-The app binary and bundled **resources** are included: tone YAML plus the **`sidecar/`** Python sources (`server.py`, `requirements.txt`) so the installed app can find the script without cloning the repo. Users still need a **Python runtime** and `pip install -r …/requirements.txt` (or a venv you document) until you ship an embedded interpreter or frozen sidecar.
+At runtime the app prefers **`resource_dir()/python-runtime/python.exe`** (see `paths::bundled_python_exe`); override with **`YAPPER_PYTHON`** if needed.
 
-## End-user story (target)
+**Quick dev build without embedding Python:** `npm run pack` only, and use system Python + `pip install -r sidecar/requirements.txt` on your machine.
+
+## End-user story
 
 1. User downloads `Yapper-setup.exe` from GitHub Releases or your site.
-2. Installer places the app and registers Start Menu / optional auto-start.
-3. First launch: optional bootstrap (e.g. download Whisper weights to `%LOCALAPPDATA%`, or run bundled inference).
+2. Installer places the app (Rust + UI + embedded Python + `sidecar/` sources) and registers Start Menu / optional auto-start.
+3. First dictation: Whisper **model weights** may download to the app cache under `%LOCALAPPDATA%` (large, one-time per model).
 
-## Roadmap to “no Python installed”
+## Size and maintenance
 
-| Approach | Pros | Cons |
-|----------|------|------|
-| **Embeddable Python + venv** in `resources/` | Same `server.py`, reproducible | Larger download (~tens of MB+), you maintain runtime updates |
-| **PyInstaller / Nuitka** one-file sidecar | Single extra `.exe`, no visible Python | Build complexity, AV false positives |
-| **Remote-only default** | Tiny desktop installer; GPU on another PC | Requires your Yapper Node on LAN/VPN |
-
-Recommended order: ship **NSIS + documented Python** for early adopters → add **embedded sidecar** → add **code signing** → add **auto-update** (`tauri-plugin-updater`).
+| Topic | Notes |
+|--------|--------|
+| Installer size | Embeddable Python + wheels is **tens to low hundreds of MB** (faster-whisper / CTranslate2). |
+| Runtime updates | Bump **`$PyTag`** in `scripts/bundle-windows-python-runtime.ps1` when you want a newer CPython security release; rebuild `pack:release`. |
+| Alternatives | **PyInstaller** one-file sidecar is possible later (smaller surface, more packaging edge cases). |
 
 ## Code signing (Windows)
 
@@ -48,4 +49,4 @@ Unsigned installers trigger **SmartScreen** warnings. For public distribution:
 
 ## CI (optional)
 
-Use a workflow that runs on `windows-latest`, installs Rust + Node + MSVC, runs `npm ci && npm run tauri build`, and uploads `bundle/` artifacts. Keep secrets (signing cert) in repository encrypted variables.
+On **`windows-latest`**: install Rust + Node + MSVC, then **`npm ci && npm run pack:release`** (not plain `tauri build`, unless you intentionally skip the embedded runtime). Upload `bundle/` artifacts. Keep signing secrets in encrypted variables.

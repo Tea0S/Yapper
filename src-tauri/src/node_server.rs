@@ -1,7 +1,7 @@
 use crate::db::get_setting;
 use crate::open_db;
 use crate::paths::yapper_node_main_path;
-use crate::sidecar::default_python;
+use crate::sidecar::python_executable;
 use crate::state::AppState;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -147,7 +147,7 @@ pub async fn yapper_node_start(
         return Err("Set a server password first (Settings → Network processing server).".into());
     }
 
-    let python = default_python();
+    let python = python_executable(&app);
     state.yapper_node_logs.lock().await.clear();
 
     let mut cmd = Command::new(&python);

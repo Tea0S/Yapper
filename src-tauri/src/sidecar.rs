@@ -398,15 +398,22 @@ impl SidecarSession {
     }
 }
 
-/// Interpreter for the sidecar. `YAPPER_PYTHON` wins; on Windows we prefer `py -3.12` / `-3.11` / `-3.10`
-/// so we do not accidentally pick a too-new `python` on PATH (e.g. 3.14 without ctranslate2 wheels).
-pub fn default_python() -> String {
+/// Interpreter for the sidecar and Yapper Node.
+/// Order: `YAPPER_PYTHON`, bundled embeddable runtime (release layout), then Windows `py` launcher / `python`.
+pub fn python_executable(app: &tauri::AppHandle) -> String {
     if let Ok(p) = std::env::var("YAPPER_PYTHON") {
         let t = p.trim();
         if !t.is_empty() {
             return t.to_string();
         }
     }
+    if let Some(p) = crate::paths::bundled_python_exe(app) {
+        return p.to_string_lossy().into_owned();
+    }
+    system_python_fallback()
+}
+
+fn system_python_fallback() -> String {
     #[cfg(windows)]
     {
         for ver in ["-3.12", "-3.11", "-3.10"] {

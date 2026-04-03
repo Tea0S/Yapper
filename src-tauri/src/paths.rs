@@ -20,6 +20,16 @@ pub fn model_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Windows: `resources/python-runtime/python.exe` after running `scripts/bundle-windows-python-runtime.ps1`.
+pub fn bundled_python_exe(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let res = app.path().resource_dir().ok()?;
+    let exe = res.join("python-runtime").join("python.exe");
+    if exe.is_file() {
+        return Some(exe);
+    }
+    None
+}
+
 /// Resolves `sidecar/server.py` for dev, installed layout next to the exe, or Tauri bundled resources.
 pub fn sidecar_script_path(app: &tauri::AppHandle) -> PathBuf {
     if let Ok(p) = std::env::var("YAPPER_SIDECAR") {
