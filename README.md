@@ -99,4 +99,3 @@ For a quick build **without** embedding Python (dev machine only), use `npm run 
 
 **End users of a `pack:release` build:** no Python install required for local dictation or in-app Yapper Node. The first Whisper model still downloads to the app cache on use (can be large). **Visual C++ Redistributable** is usually already present on Windows; install it if import errors mention missing `VCRUNTIME`.
 
-**Still recommended for public downloads:** code signing (SmartScreen), then **GitHub Releases** / **winget**. See [docs/distribution.md](docs/distribution.md).
