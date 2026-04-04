@@ -52,6 +52,23 @@ Unsigned installers trigger **SmartScreen** warnings. For public distribution:
 - **winget** — publish a manifest pointing at your release URLs.
 - **Microsoft Store** — possible later via MSIX path (separate packaging effort).
 
-## CI (optional)
+## Automated dual-platform release (GitHub Actions)
 
-On **`windows-latest`**: install Rust + Node + MSVC, then **`npm ci && npm run pack:release`** after writing the minisign private key to `src-tauri/.tauri/updater.key`, or set **`TAURI_SIGNING_PRIVATE_KEY`** from a secret and use **`npm run pack:raw`** after `bundle:python`. Upload `bundle/` artifacts.
+Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml). **Trigger:** push a tag matching `v*` (for example `v1.0.8`). The workflow runs **`build-windows`** and **`build-macos`** in parallel, then **`publish`** merges updater metadata and creates/updates the GitHub Release.
+
+**Repository secret (required):**
+
+- **`TAURI_SIGNING_PRIVATE_KEY`** — paste the **full** minisign private key (same material as `src-tauri/.tauri/updater.key` locally). The workflow writes it to `updater.key` on the runner before `tauri build`. The **public** key in `tauri.conf.json` must stay in sync.
+
+**What gets uploaded**
+
+- Windows: NSIS `.exe` + `.sig`, MSI + `.sig` (when produced), and a generated **`latest.json`** that includes **both** Windows and Darwin `platforms` entries (see [`scripts/updater-manifest.mjs`](../scripts/updater-manifest.mjs)).
+- macOS (Apple Silicon runner): DMG (and related bundle outputs) + `.sig`. The mac bundle uses **`npm run bundle:python:mac`** via [`scripts/pack-with-updater-signing.sh`](../scripts/pack-with-updater-signing.sh) `--release`.
+
+**Tag vs version:** Download URLs use **`GITHUB_REF_NAME`** (the tag, e.g. `v1.0.8`). Keep that tag aligned with `version` in `tauri.conf.json` / `package.json` so asset names and the manifest stay consistent.
+
+**Optional later:** Apple **Developer ID** signing and **notarization** on the macOS job (extra secrets + `xcrun notarytool`) for smoother Gatekeeper behavior; unsigned CI builds may require “Open” from context menu on first launch.
+
+## CI (manual / one-off)
+
+On **`windows-latest`** you can still run **`npm ci && npm run pack:release`** locally or in a generic workflow after configuring **`TAURI_SIGNING_PRIVATE_KEY`** (or writing `src-tauri/.tauri/updater.key`). For **combined** Windows + Mac **`latest.json`**, use the release workflow or run **`node scripts/updater-manifest.mjs merge …`** yourself (see script usage).

@@ -28,3 +28,6 @@ Thumbs.db
 
 # Bundled Python runtime (Windows: scripts/bundle-windows-python-runtime.ps1; macOS: npm run bundle:python:mac)
 src-tauri/resources/python-runtime/
+
+# CI / local updater helper output (see scripts/updater-manifest.mjs)
+/platforms.partial.json

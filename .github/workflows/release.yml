@@ -1,0 +1,184 @@
+# Push tag v* → build Windows + macOS installers, merge updater manifest, publish GitHub Release.
+# Requires repo secret: TAURI_SIGNING_PRIVATE_KEY (full minisign private key text).
+# Optional later: add Apple Developer ID signing + notarization on the macOS job (cert + notarytool env).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      GITHUB_REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require TAURI_SIGNING_PRIVATE_KEY
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: test -n "${TAURI_SIGNING_PRIVATE_KEY}"
+
+      - name: Write minisign key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: >
+          node -e "const fs=require('fs');fs.mkdirSync('src-tauri/.tauri',{recursive:true});fs.writeFileSync('src-tauri/.tauri/updater.key', process.env.TAURI_SIGNING_PRIVATE_KEY)"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Bundle Windows Python runtime
+        run: npm run bundle:python
+
+      - run: npm run build
+
+      - name: Tauri build (updater artifacts)
+        run: npx tauri build -c src-tauri/tauri.updater-release.conf.json
+
+      - name: Write platforms partial (Windows)
+        run: node scripts/updater-manifest.mjs partial-windows release
+
+      - name: Collect upload folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force upload | Out-Null
+          Copy-Item -Path "src-tauri/target/release/bundle/nsis/*" -Destination upload/ -Force -ErrorAction SilentlyContinue
+          Copy-Item -Path "src-tauri/target/release/bundle/msi/*" -Destination upload/ -Force -ErrorAction SilentlyContinue
+          Copy-Item platforms.partial.json upload/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
+          path: upload/
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      GITHUB_REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require TAURI_SIGNING_PRIVATE_KEY
+        run: test -n "${TAURI_SIGNING_PRIVATE_KEY}"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
+      - name: Write minisign key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          mkdir -p src-tauri/.tauri
+          node -e "const fs=require('fs');fs.mkdirSync('src-tauri/.tauri',{recursive:true});fs.writeFileSync('src-tauri/.tauri/updater.key', process.env.TAURI_SIGNING_PRIVATE_KEY)"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Pack release (Python + signed Tauri bundle)
+        run: bash scripts/pack-with-updater-signing.sh --release
+
+      - name: Write platforms partial (Darwin)
+        run: node scripts/updater-manifest.mjs partial-darwin release
+
+      - name: Collect upload folder
+        run: |
+          mkdir -p upload
+          shopt -s nullglob
+          for d in src-tauri/target/release/bundle/dmg src-tauri/target/release/bundle/macos; do
+            if [ -d "$d" ]; then
+              for f in "$d"/*; do
+                [ -f "$f" ] || continue
+                cp "$f" upload/
+              done
+            fi
+          done
+          cp platforms.partial.json upload/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: upload/
+          if-no-files-found: error
+
+  publish:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-assets
+          path: assets/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-assets
+          path: assets/macos
+
+      - name: Merge latest.json
+        run: |
+          mkdir -p release-out
+          node scripts/updater-manifest.mjs merge \
+            assets/windows/platforms.partial.json \
+            assets/macos/platforms.partial.json \
+            -o release-out/latest.json
+
+      - name: Stage release binaries
+        run: |
+          shopt -s nullglob
+          for f in assets/windows/*; do
+            [[ "$(basename "$f")" == platforms.partial.json ]] && continue
+            cp "$f" release-out/
+          done
+          for f in assets/macos/*; do
+            [[ "$(basename "$f")" == platforms.partial.json ]] && continue
+            cp "$f" release-out/
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-out/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
