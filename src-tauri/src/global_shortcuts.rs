@@ -29,7 +29,8 @@ fn spawn_ptt_stop_after_pending(app: AppHandle, label: &'static str) {
                     text.len()
                 ));
                 if !text.is_empty() {
-                    let _ = crate::paste::paste_text_at_focus(&text);
+                    // Main thread + correct modifier (⌘ on macOS, Ctrl elsewhere) — see paste.rs.
+                    let _ = crate::paste::paste_text_at_focus_on_main_thread(&app, text);
                 }
             }
             Err(e) => shortcut_log(format!("{label}: stop failed: {e}")),

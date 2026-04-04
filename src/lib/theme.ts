@@ -4,6 +4,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export type UiTheme = "system" | "light" | "dark";
 
+function isHudRoute(): boolean {
+  return typeof window !== "undefined" && window.location.pathname === "/hud";
+}
+
+/**
+ * Match app shell to theme immediately (avoids white flash on load / theme toggle).
+ * See PR #1 commit dcd7c53 — inline `app.html` defaults + native window color + body fill.
+ */
 export function applyUiTheme(mode: UiTheme) {
   const root = document.documentElement;
   if (mode === "system") {
@@ -13,9 +21,11 @@ export function applyUiTheme(mode: UiTheme) {
   }
   const resolved = resolveUiTheme(mode);
   root.style.colorScheme = resolved;
-  document.body.style.backgroundColor = resolved === "light" ? "#f4f2ee" : "#0e1114";
+  if (!isHudRoute()) {
+    document.body.style.backgroundColor = resolved === "light" ? "#f4f2ee" : "#0e1114";
+    void syncWindowBackground(resolved);
+  }
   void syncNativeTheme(mode);
-  void syncWindowBackground(resolved);
 }
 
 function resolveUiTheme(mode: UiTheme): "light" | "dark" {

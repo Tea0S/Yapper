@@ -32,6 +32,6 @@ pub fn paste_text_at_focus_on_main_thread(
         let _ = tx.send(paste_text_at_focus(&text));
     })
     .map_err(|e| e.to_string())?;
-    rx.recv()
-        .map_err(|e| e.to_string())?
+    let paste_result = rx.recv().map_err(|e| e.to_string())?;
+    paste_result
 }

@@ -10,7 +10,7 @@
     "core:app:allow-default-window-icon",
     "core:window:allow-start-dragging",
     "core:window:allow-set-icon",
-    "core:window:allow-start-dragging",
+    "core:window:allow-set-background-color",
     "allow-yapper-invoke",
     "dialog:default",
     "global-shortcut:default",

@@ -1220,6 +1220,20 @@ struct HudSnapshot {
     phase: HudPhase,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HudChromeInfo {
+    /// From `cfg!` — do not infer from `navigator.userAgent` (breaks Windows WebView).
+    macos: bool,
+}
+
+#[tauri::command]
+fn hud_chrome_info() -> HudChromeInfo {
+    HudChromeInfo {
+        macos: cfg!(target_os = "macos"),
+    }
+}
+
 #[tauri::command]
 fn hud_snapshot(state: State<'_, AppState>) -> Result<HudSnapshot, String> {
     let g = state.hud_phase.lock().map_err(|e| e.to_string())?;
@@ -1404,6 +1418,7 @@ pub fn run() {
             list_audio_input_devices,
             get_mic_input_level,
             install_nvidia_whisper_libs,
+            hud_chrome_info,
             hud_snapshot,
             hud_sync_visibility_cmd,
             focus_main_window,

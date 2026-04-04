@@ -24,6 +24,7 @@
     whisperRuntimeMbHint,
     WHISPER_MODEL_OPTIONS,
   } from "$lib/whisperModelInfo";
+  import { formatShortcutDisplay } from "$lib/formatShortcutDisplay";
 
   function n(s: string, fallback: number): number {
     const v = Number.parseFloat(s);
@@ -89,6 +90,8 @@
   let kPtt = $state("");
   let kMic = $state("");
   let kStop = $state("");
+  /** From Rust `cfg!(target_os = "macos")` — drives ⌘⌃⌥⇧ vs Ctrl/Win labels. */
+  let shortcutUiMac = $state(false);
   type KeybindCaptureTarget = "push_to_talk" | "toggle_open_mic" | "stop_dictation";
   let captureTarget = $state<KeybindCaptureTarget | null>(null);
   let conflict = $state<string[]>([]);
@@ -158,6 +161,12 @@
   async function load() {
     uiTheme = await loadUiTheme();
     applyUiTheme(uiTheme);
+    try {
+      const chrome = await invoke<{ macos: boolean }>("hud_chrome_info");
+      shortcutUiMac = chrome.macos;
+    } catch {
+      shortcutUiMac = false;
+    }
     inferenceHost =
       (await invoke<string | null>("get_setting_cmd", { key: "inference_host" })) ??
       "local";
@@ -1247,7 +1256,8 @@
     <h2>Keyboard shortcuts</h2>
     <p class="muted short">
       Use <strong>Record shortcut</strong> and press the real keys (modifiers + one key). Esc cancels. You can still edit the
-      text field manually. Global shortcuts need the inference engine running for dictation.
+      text field manually. When a shortcut is set, a readable label appears below (e.g. ⌘⇧ on macOS, Ctrl + Shift elsewhere).
+      Global shortcuts need the inference engine running for dictation.
     </p>
     {#if captureTarget}
       <p class="capture-hint" role="status">
@@ -1269,6 +1279,11 @@
           {captureTarget === "push_to_talk" ? "Listening…" : "Record shortcut"}
         </button>
       </div>
+      {#if kPtt.trim()}
+        <p class="field-hint keybind-as">
+          Shown as <span class="mono">{formatShortcutDisplay(kPtt, { mac: shortcutUiMac })}</span>
+        </p>
+      {/if}
     </div>
     <div class="field">
       <label for="k2">Toggle open mic</label>
@@ -1285,6 +1300,11 @@
           {captureTarget === "toggle_open_mic" ? "Listening…" : "Record shortcut"}
         </button>
       </div>
+      {#if kMic.trim()}
+        <p class="field-hint keybind-as">
+          Shown as <span class="mono">{formatShortcutDisplay(kMic, { mac: shortcutUiMac })}</span>
+        </p>
+      {/if}
     </div>
     <div class="field">
       <label for="k3">Stop dictation</label>
@@ -1300,6 +1320,11 @@
           {captureTarget === "stop_dictation" ? "Listening…" : "Record shortcut"}
         </button>
       </div>
+      {#if kStop.trim()}
+        <p class="field-hint keybind-as">
+          Shown as <span class="mono">{formatShortcutDisplay(kStop, { mac: shortcutUiMac })}</span>
+        </p>
+      {/if}
     </div>
     {#if conflict.length}
       <p class="warn">Shortcut already used by: {conflict.join(", ")}</p>
@@ -1438,6 +1463,11 @@
     flex-shrink: 0;
     font-size: 0.85rem;
   }
+  .keybind-as {
+    margin-top: 0.35rem;
+    margin-bottom: 0;
+  }
+
   .keybind-record.active {
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 22%, var(--bg-elevated));

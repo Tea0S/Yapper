@@ -27,6 +27,7 @@ commands.allow = [
   "list_audio_input_devices",
   "get_mic_input_level",
   "install_nvidia_whisper_libs",
+  "hud_chrome_info",
   "hud_snapshot",
   "hud_sync_visibility_cmd",
   "focus_main_window",
