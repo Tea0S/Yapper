@@ -11,6 +11,8 @@ mod sidecar;
 mod state;
 mod trace_log;
 mod node_server;
+#[cfg(windows)]
+mod win_taskbar_icon;
 
 use crate::db::{
     check_keybind_conflicts, get_setting, import_dictionary_merge, import_dictionary_replace,
@@ -1192,6 +1194,22 @@ fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Re-applies small + big (`ICON_BIG`) window icons on Windows — WebView2 can reset the taskbar icon after load.
+#[tauri::command]
+fn sync_windows_taskbar_icon(app: tauri::AppHandle) {
+    #[cfg(windows)]
+    {
+        let Some(win) = app.get_webview_window("main") else {
+            return;
+        };
+        let Some(icon) = app.default_window_icon().cloned() else {
+            return;
+        };
+        let _ = win.set_icon(icon.clone());
+        win_taskbar_icon::apply_taskbar_big_icon(&win, &icon);
+    }
+}
+
 #[tauri::command]
 async fn cuda_available() -> bool {
     std::process::Command::new("nvidia-smi")
@@ -1248,6 +1266,7 @@ pub fn run() {
                 bundled_icon.as_ref(),
             ) {
                 let _ = main.set_icon(icon.clone());
+                win_taskbar_icon::apply_taskbar_big_icon(&main, icon);
             }
 
             let mut tray = TrayIconBuilder::new();
@@ -1310,6 +1329,7 @@ pub fn run() {
             install_nvidia_whisper_libs,
             hud_snapshot,
             focus_main_window,
+            sync_windows_taskbar_icon,
             node_server::yapper_node_status,
             node_server::yapper_node_start,
             node_server::yapper_node_stop,

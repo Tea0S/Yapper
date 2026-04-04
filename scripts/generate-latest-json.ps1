@@ -1,6 +1,7 @@
 # Writes updater static manifest latest.json next to the NSIS bundle after `tauri build`.
 # Reads version + GitHub owner/repo from src-tauri/tauri.conf.json (plugins.updater.endpoints).
 # Override installer URL: $env:YAPPER_INSTALLER_DOWNLOAD_URL = 'https://.../file.exe'
+# If Git tag != version (e.g. tag v1.0.4 but version 1.0.4): $env:YAPPER_RELEASE_TAG = 'v1.0.4'
 param(
     [ValidateSet("release", "debug")]
     [string]$Profile = "release"
@@ -54,7 +55,9 @@ if (-not $installerUrl) {
     }
     $owner = $Matches[1]
     $repo = $Matches[2]
-    $tag = if ($version.StartsWith("v")) { $version } else { "v$version" }
+    # Must match the GitHub release tag exactly (many repos use "1.0.4", not "v1.0.4").
+    # Override when your tag differs from tauri.conf version: $env:YAPPER_RELEASE_TAG = 'v1.0.4'
+    $tag = if ($env:YAPPER_RELEASE_TAG) { $env:YAPPER_RELEASE_TAG } else { $version }
     $installerUrl = "https://github.com/$owner/$repo/releases/download/$tag/$($exe.Name)"
 }
 

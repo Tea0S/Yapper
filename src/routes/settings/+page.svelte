@@ -659,7 +659,7 @@
           disabled={updateInstallBusy}
           onclick={installPendingUpdate}
         >
-          {updateInstallBusy ? "Installing…" : "Download &amp; install"}
+          {updateInstallBusy ? "Installing…" : "Download & install"}
         </button>
       {/if}
     </div>

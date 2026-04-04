@@ -46,7 +46,7 @@ Unsigned installers trigger **SmartScreen** warnings. For public distribution:
 ## Hosting
 
 - **GitHub Releases** — attach `*-setup.exe` + `.msi`. With the built-in updater (`tauri-plugin-updater`), also attach per release:
-  - **`latest.json`** at `releases/latest/download/latest.json` (static JSON listing `version`, optional `notes` / `pub_date`, and `platforms["windows-x86_64"].url` + `.signature` from the `.sig` file next to the NSIS installer).
+  - **`latest.json`** at `releases/latest/download/latest.json` (static JSON listing `version`, optional `notes` / `pub_date`, and `platforms["windows-x86_64"].url` + `.signature` from the `.sig` file next to the NSIS installer). The `url` must use the **same Git tag** as the release (e.g. `.../download/1.0.4/...` if the tag is `1.0.4`). `scripts/generate-latest-json.ps1` uses `tauri.conf.json`’s `version` as the tag; set **`YAPPER_RELEASE_TAG`** if your Git tag differs (e.g. `v1.0.4`).
   - Keep **`plugins.updater.endpoints`** in `src-tauri/tauri.conf.json` pointed at that URL (replace `yourusername/yapper` with your org/repo).
   - Sign builds with the minisign key: **`npm run pack`** / **`npm run pack:release`** load the gitignored file `src-tauri/.tauri/updater.key` into **`TAURI_SIGNING_PRIVATE_KEY`** (required by the bundler). In CI, set **`TAURI_SIGNING_PRIVATE_KEY`** to the full key text (or inject the file and read it into that variable). The **public** key in `tauri.conf.json` must match the private key. Escape hatch without the script: **`npm run pack:raw`** (still needs the env var if `createUpdaterArtifacts` is true). See [Tauri updater](https://v2.tauri.app/plugin/updater/).
 - **winget** — publish a manifest pointing at your release URLs.

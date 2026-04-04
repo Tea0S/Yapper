@@ -34,21 +34,26 @@
     { href: "/settings", label: "Settings" },
   ];
 
-  /** Windows + devUrl: taskbar can stay on WebView2's blue placeholder until icon is set after load. */
+  /** Windows: `setIcon` only updates the small icon; Rust also sets `ICON_BIG` for the taskbar. */
   async function reapplyWindowIconFromBundle() {
     try {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const { defaultWindowIcon } = await import("@tauri-apps/api/app");
-      const icon = await defaultWindowIcon();
-      if (icon) await getCurrentWindow().setIcon(icon);
+      await invoke("sync_windows_taskbar_icon");
     } catch {
-      /* browser / non-Tauri */
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const { defaultWindowIcon } = await import("@tauri-apps/api/app");
+        const icon = await defaultWindowIcon();
+        if (icon) await getCurrentWindow().setIcon(icon);
+      } catch {
+        /* browser / non-Tauri */
+      }
     }
   }
 
   onMount(() => {
     let cancelled = false;
     void reapplyWindowIconFromBundle();
+    const iconResync = window.setTimeout(() => void reapplyWindowIconFromBundle(), 800);
     void loadInstanceTag();
     void (async () => {
       const mode = await loadUiTheme();
@@ -58,6 +63,7 @@
     if (typeof window !== "undefined" && window.location.pathname === "/hud") {
       return () => {
         cancelled = true;
+        window.clearTimeout(iconResync);
       };
     }
     (async () => {
@@ -71,6 +77,7 @@
     })();
     return () => {
       cancelled = true;
+      window.clearTimeout(iconResync);
       void unregisterAll();
     };
   });
