@@ -17,6 +17,11 @@ Support the development of Yapper.
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/M4M21WSC82)
 
+## Still in Progress
+- Remote server transcription still needs to be tested 
+- Tone settings need to be actually built out
+- High Contrast Mode
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) and [Node.js](https://nodejs.org/) (for Tauri 2 + SvelteKit)
