@@ -12,9 +12,10 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "bundle:python": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-windows-python-runtime.ps1",
-    "pack": "tauri build",
-    "pack:release": "npm run bundle:python && npm run pack",
-    "pack:debug": "tauri build --debug"
+    "pack": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-with-updater-signing.ps1",
+    "pack:raw": "tauri build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-latest-json.ps1",
+    "pack:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-with-updater-signing.ps1 -Release",
+    "pack:debug": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-with-updater-signing.ps1 -Debug"
   },
   "license": "MIT",
   "dependencies": {

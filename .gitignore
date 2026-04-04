@@ -8,6 +8,7 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+/docs
 
 # Python (sidecar / yapper-node)
 __pycache__/

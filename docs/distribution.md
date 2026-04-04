@@ -5,7 +5,7 @@ Goal: a **single downloadable installer** so end users never install Python or r
 ## Release build (`npm run pack:release`)
 
 1. **`npm run bundle:python`** — PowerShell script downloads Windows **embeddable CPython** (see `scripts/bundle-windows-python-runtime.ps1`), bootstraps **pip**, and installs merged deps from `scripts/python-runtime-requirements.txt` (sidecar + Yapper Node) into **`src-tauri/resources/python-runtime/`** (gitignored, not committed).
-2. **`npm run pack`** — `tauri build` bundles that folder via `resources/**/*` and produces installers under:
+2. **`npm run pack`** (or **`npm run pack:release`** for Python + build) — `scripts/pack-with-updater-signing.ps1` loads `src-tauri/.tauri/updater.key` into **`TAURI_SIGNING_PRIVATE_KEY`**, then runs `tauri build`, which bundles via `resources/**/*` and produces installers under:
 
 `src-tauri/target/release/bundle/`
 
@@ -48,10 +48,10 @@ Unsigned installers trigger **SmartScreen** warnings. For public distribution:
 - **GitHub Releases** — attach `*-setup.exe` + `.msi`. With the built-in updater (`tauri-plugin-updater`), also attach per release:
   - **`latest.json`** at `releases/latest/download/latest.json` (static JSON listing `version`, optional `notes` / `pub_date`, and `platforms["windows-x86_64"].url` + `.signature` from the `.sig` file next to the NSIS installer).
   - Keep **`plugins.updater.endpoints`** in `src-tauri/tauri.conf.json` pointed at that URL (replace `yourusername/yapper` with your org/repo).
-  - Sign builds with the minisign key: local file via `TAURI_SIGNING_PRIVATE_KEY_PATH`, or paste the key into `TAURI_SIGNING_PRIVATE_KEY` in CI. The **public** key in `tauri.conf.json` must match the private key used to sign. See [Tauri updater](https://v2.tauri.app/plugin/updater/).
+  - Sign builds with the minisign key: **`npm run pack`** / **`npm run pack:release`** load the gitignored file `src-tauri/.tauri/updater.key` into **`TAURI_SIGNING_PRIVATE_KEY`** (required by the bundler). In CI, set **`TAURI_SIGNING_PRIVATE_KEY`** to the full key text (or inject the file and read it into that variable). The **public** key in `tauri.conf.json` must match the private key. Escape hatch without the script: **`npm run pack:raw`** (still needs the env var if `createUpdaterArtifacts` is true). See [Tauri updater](https://v2.tauri.app/plugin/updater/).
 - **winget** — publish a manifest pointing at your release URLs.
 - **Microsoft Store** — possible later via MSIX path (separate packaging effort).
 
 ## CI (optional)
 
-On **`windows-latest`**: install Rust + Node + MSVC, then **`npm ci && npm run pack:release`** (not plain `tauri build`, unless you intentionally skip the embedded runtime). Upload `bundle/` artifacts. Keep signing secrets in encrypted variables.
+On **`windows-latest`**: install Rust + Node + MSVC, then **`npm ci && npm run pack:release`** after writing the minisign private key to `src-tauri/.tauri/updater.key`, or set **`TAURI_SIGNING_PRIVATE_KEY`** from a secret and use **`npm run pack:raw`** after `bundle:python`. Upload `bundle/` artifacts.

@@ -73,7 +73,7 @@
 <div class="shell">
   <aside class="sidebar">
     <div class="brand">
-      <span class="mark">◆</span>
+      <img class="mark" src="/yapper-mouth.png" alt="" width="40" height="40" />
       <div>
         <div class="name">Yapper</div>
         <div class="tag">{instanceTag}</div>
@@ -117,9 +117,11 @@
     align-items: center;
   }
   .mark {
-    font-size: 1.75rem;
-    color: var(--accent);
-    line-height: 1;
+    width: 2.25rem;
+    height: 2.25rem;
+    object-fit: contain;
+    flex-shrink: 0;
+    display: block;
   }
   .name {
     font-family: var(--font-display);
