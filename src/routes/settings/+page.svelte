@@ -1,5 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { check, type Update } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import { afterNavigate } from "$app/navigation";
   import { onMount } from "svelte";
   import { createShortcutCaptureSession } from "$lib/keybindCapture";
@@ -120,6 +123,21 @@
   });
   let nvidiaInstallBusy = $state(false);
   let nvidiaInstallLog = $state("");
+
+  let appVersion = $state("");
+  let updateCheckBusy = $state(false);
+  let updateInstallBusy = $state(false);
+  let updateErr = $state<string | null>(null);
+  type PendingUpdate = {
+    version: string;
+    currentVersion: string;
+    date?: string;
+    body?: string;
+    raw: Update;
+  };
+  let pendingUpdate = $state<PendingUpdate | null>(null);
+  let updateProgressLabel = $state<string | null>(null);
+  let updateLastCheckUpToDate = $state(false);
 
   type ModelCacheDiagnostic = {
     cacheDir: string;
@@ -340,7 +358,86 @@
 
   onMount(() => {
     void load();
+    void (async () => {
+      try {
+        appVersion = await getVersion();
+      } catch {
+        appVersion = "";
+      }
+    })();
   });
+
+  async function checkForUpdates() {
+    if (import.meta.env.DEV) {
+      updateErr = "Update checks run in the packaged app (after tauri build), not in dev mode.";
+      pendingUpdate = null;
+      return;
+    }
+    updateCheckBusy = true;
+    updateErr = null;
+    pendingUpdate = null;
+    updateProgressLabel = null;
+    updateLastCheckUpToDate = false;
+    try {
+      const u = await check({ timeout: 30_000 });
+      if (!u) {
+        pendingUpdate = null;
+        updateErr = null;
+        updateLastCheckUpToDate = true;
+        return;
+      }
+      pendingUpdate = {
+        version: u.version,
+        currentVersion: u.currentVersion,
+        date: u.date,
+        body: u.body,
+        raw: u,
+      };
+    } catch (e) {
+      updateErr = String(e);
+      pendingUpdate = null;
+    } finally {
+      updateCheckBusy = false;
+    }
+  }
+
+  async function installPendingUpdate() {
+    const u = pendingUpdate?.raw;
+    if (!u) return;
+    updateInstallBusy = true;
+    updateErr = null;
+    updateProgressLabel = null;
+    try {
+      let downloaded = 0;
+      let total: number | undefined;
+      await u.downloadAndInstall((event) => {
+        switch (event.event) {
+          case "Started":
+            total = event.data.contentLength ?? undefined;
+            downloaded = 0;
+            updateProgressLabel = total
+              ? `Downloading… 0 / ${total} bytes`
+              : "Downloading…";
+            break;
+          case "Progress":
+            downloaded += event.data.chunkLength;
+            updateProgressLabel =
+              total !== undefined
+                ? `Downloading… ${downloaded} / ${total} bytes`
+                : `Downloading… ${downloaded} bytes`;
+            break;
+          case "Finished":
+            updateProgressLabel = "Installing…";
+            break;
+        }
+      });
+      await relaunch();
+    } catch (e) {
+      updateErr = String(e);
+    } finally {
+      updateInstallBusy = false;
+    }
+  }
 
   $effect(() => {
     if (typeof window === "undefined") return;
@@ -516,6 +613,61 @@
         class="theme-seg"
         class:active={uiTheme === "system"}
         onclick={() => changeUiTheme("system")}>Match system</button>
+    </div>
+  </div>
+
+  <div class="panel block" id="app-updates">
+    <h2>Updates</h2>
+    <p class="muted short">
+      Packaged builds can check <strong>GitHub Releases</strong> using a <code>latest.json</code> file on the latest
+      release. Set your repo URL under <code>plugins.updater.endpoints</code> in
+      <code>src-tauri/tauri.conf.json</code>, and publish signing keys as described in the
+      <a href="https://v2.tauri.app/plugin/updater/">Tauri updater docs</a>.
+    </p>
+    <p class="muted short">
+      This version: <strong>{appVersion || "—"}</strong>
+    </p>
+    {#if import.meta.env.DEV}
+      <p class="note">Run a release build to test updates end-to-end.</p>
+    {/if}
+    {#if pendingUpdate}
+      <p class="update-banner" role="status">
+        Update available: <strong>{pendingUpdate.version}</strong>
+        {#if pendingUpdate.date}
+          <span class="muted">· {pendingUpdate.date}</span>
+        {/if}
+      </p>
+      {#if pendingUpdate.body}
+        <pre class="update-notes">{pendingUpdate.body}</pre>
+      {/if}
+    {:else if updateLastCheckUpToDate && !updateErr && !import.meta.env.DEV}
+      <p class="muted short">You're up to date.</p>
+    {/if}
+    {#if updateProgressLabel}
+      <p class="muted short" role="status">{updateProgressLabel}</p>
+    {/if}
+    {#if updateErr}
+      <p class="warn" role="alert">{updateErr}</p>
+    {/if}
+    <div class="update-actions">
+      <button
+        type="button"
+        class="btn"
+        disabled={updateCheckBusy || updateInstallBusy}
+        onclick={checkForUpdates}
+      >
+        {updateCheckBusy ? "Checking…" : "Check for updates"}
+      </button>
+      {#if pendingUpdate}
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={updateInstallBusy}
+          onclick={installPendingUpdate}
+        >
+          {updateInstallBusy ? "Installing…" : "Download &amp; install"}
+        </button>
+      {/if}
     </div>
   </div>
 
@@ -1397,5 +1549,27 @@
   .btn-stop:hover:not(:disabled) {
     border-color: var(--danger);
     background: color-mix(in srgb, var(--danger) 28%, var(--bg-elevated));
+  }
+  .update-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .update-banner {
+    margin: 0.75rem 0 0.35rem;
+    font-size: 0.92rem;
+  }
+  .update-notes {
+    margin: 0.5rem 0 0;
+    padding: 0.55rem 0.65rem;
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-height: 10rem;
+    overflow: auto;
   }
 </style>

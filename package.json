@@ -1,6 +1,6 @@
 {
   "name": "yapper",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Local-first dictation for Windows",
   "type": "module",
   "scripts": {
@@ -20,7 +20,9 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
-    "@tauri-apps/plugin-global-shortcut": "^2"
+    "@tauri-apps/plugin-global-shortcut": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.0"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",

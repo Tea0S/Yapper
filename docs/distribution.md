@@ -26,6 +26,8 @@ At runtime the app prefers **`resource_dir()/python-runtime/python.exe`** (see `
 2. Installer places the app (Rust + UI + embedded Python + `sidecar/` sources) and registers Start Menu / optional auto-start.
 3. First dictation: Whisper **model weights** may download to the app cache under `%LOCALAPPDATA%` (large, one-time per model).
 
+If you see **`Unable to open file 'model.bin'`**, the Hugging Face download was interrupted or the cache is partial. The sidecar will try to delete that model’s cache folder and re-download once; if it still fails, remove `%LOCALAPPDATA%\com.yapper.app\models\models--Systran--faster-whisper-*` (or the matching repo folder) and start the engine again. Keep disk space free and stable network for large models (e.g. **large-v3**).
+
 ## Size and maintenance
 
 | Topic | Notes |
@@ -43,7 +45,10 @@ Unsigned installers trigger **SmartScreen** warnings. For public distribution:
 
 ## Hosting
 
-- **GitHub Releases** — attach `*-setup.exe` + `.msi` + `latest.json` if you add the updater.
+- **GitHub Releases** — attach `*-setup.exe` + `.msi`. With the built-in updater (`tauri-plugin-updater`), also attach per release:
+  - **`latest.json`** at `releases/latest/download/latest.json` (static JSON listing `version`, optional `notes` / `pub_date`, and `platforms["windows-x86_64"].url` + `.signature` from the `.sig` file next to the NSIS installer).
+  - Keep **`plugins.updater.endpoints`** in `src-tauri/tauri.conf.json` pointed at that URL (replace `yourusername/yapper` with your org/repo).
+  - Sign builds with the minisign key: local file via `TAURI_SIGNING_PRIVATE_KEY_PATH`, or paste the key into `TAURI_SIGNING_PRIVATE_KEY` in CI. The **public** key in `tauri.conf.json` must match the private key used to sign. See [Tauri updater](https://v2.tauri.app/plugin/updater/).
 - **winget** — publish a manifest pointing at your release URLs.
 - **Microsoft Store** — possible later via MSIX path (separate packaging effort).
 

@@ -84,6 +84,37 @@ def list_engines() -> list[str]:
     return engines
 
 
+def _looks_like_incomplete_hf_whisper_cache(err: BaseException) -> bool:
+    """HF snapshot dir exists but model.bin never finished downloading (interrupt, AV, disk)."""
+    s = str(err).lower()
+    return "model.bin" in s or "unable to open file" in s
+
+
+def _purge_hf_repo_cache(download_root: str, model_id: str) -> None:
+    """Remove Hugging Face hub folder for this repo so snapshot_download can run clean."""
+    import re
+    import shutil
+    from pathlib import Path
+
+    try:
+        import faster_whisper.utils as fwu
+    except ImportError:
+        return
+    if re.match(r".*/.*", model_id):
+        repo_id = model_id
+    else:
+        repo_id = fwu._MODELS.get(model_id)
+    if not repo_id:
+        return
+    folder = Path(download_root) / f"models--{repo_id.replace('/', '--')}"
+    if folder.is_dir():
+        sys.stderr.write(
+            f"yapper-sidecar: removing incomplete model cache (will re-download): {folder}\n"
+        )
+        sys.stderr.flush()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def load_whisper(model: str, device: str, compute_type: str, model_dir: Optional[str]) -> None:
     global MODEL, MODEL_NAME
     from pathlib import Path
@@ -98,12 +129,30 @@ def load_whisper(model: str, device: str, compute_type: str, model_dir: Optional
         f"compute_type={compute_type!r} download_root={download_root!r}\n"
     )
     sys.stderr.flush()
-    MODEL = WhisperModel(
-        model,
-        device=dev,
-        compute_type=compute_type,
-        download_root=download_root,
-    )
+
+    for attempt in range(2):
+        try:
+            MODEL = WhisperModel(
+                model,
+                device=dev,
+                compute_type=compute_type,
+                download_root=download_root,
+            )
+            break
+        except Exception as e:
+            if (
+                attempt == 0
+                and download_root
+                and _looks_like_incomplete_hf_whisper_cache(e)
+            ):
+                sys.stderr.write(
+                    f"yapper-sidecar: load failed ({e}); clearing HF cache entry and retrying once.\n"
+                )
+                sys.stderr.flush()
+                _purge_hf_repo_cache(download_root, model)
+                continue
+            raise
+
     MODEL_NAME = model
     resolved = getattr(MODEL, "model_path", None)
     if resolved is None:

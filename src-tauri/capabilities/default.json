@@ -7,6 +7,8 @@
     "core:default",
     "core:app:allow-set-app-theme",
     "dialog:default",
-    "global-shortcut:default"
+    "global-shortcut:default",
+    "updater:default",
+    "process:default"
   ]
 }
