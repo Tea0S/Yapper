@@ -1239,7 +1239,22 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
-            let _tray = TrayIconBuilder::new()
+            let bundled_icon = app.default_window_icon().cloned();
+            // With `devUrl` (localhost), WebView2 on Windows often leaves the taskbar/title icon as the
+            // default blue placeholder unless the window icon is applied from Rust after startup.
+            #[cfg(windows)]
+            if let (Some(main), Some(icon)) = (
+                app.get_webview_window("main"),
+                bundled_icon.as_ref(),
+            ) {
+                let _ = main.set_icon(icon.clone());
+            }
+
+            let mut tray = TrayIconBuilder::new();
+            if let Some(icon) = bundled_icon {
+                tray = tray.icon(icon);
+            }
+            let _tray = tray
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id.as_ref() {

@@ -619,12 +619,6 @@
   <div class="panel block" id="app-updates">
     <h2>Updates</h2>
     <p class="muted short">
-      Packaged builds can check <strong>GitHub Releases</strong> using a <code>latest.json</code> file on the latest
-      release. Set your repo URL under <code>plugins.updater.endpoints</code> in
-      <code>src-tauri/tauri.conf.json</code>, and publish signing keys as described in the
-      <a href="https://v2.tauri.app/plugin/updater/">Tauri updater docs</a>.
-    </p>
-    <p class="muted short">
       This version: <strong>{appVersion || "—"}</strong>
     </p>
     {#if import.meta.env.DEV}

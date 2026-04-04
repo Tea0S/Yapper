@@ -34,8 +34,21 @@
     { href: "/settings", label: "Settings" },
   ];
 
+  /** Windows + devUrl: taskbar can stay on WebView2's blue placeholder until icon is set after load. */
+  async function reapplyWindowIconFromBundle() {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const { defaultWindowIcon } = await import("@tauri-apps/api/app");
+      const icon = await defaultWindowIcon();
+      if (icon) await getCurrentWindow().setIcon(icon);
+    } catch {
+      /* browser / non-Tauri */
+    }
+  }
+
   onMount(() => {
     let cancelled = false;
+    void reapplyWindowIconFromBundle();
     void loadInstanceTag();
     void (async () => {
       const mode = await loadUiTheme();

@@ -1,6 +1,6 @@
 [package]
 name = "yapper"
-version = "1.0.3"
+version = "1.0.4"
 description = "Yapper — local-first dictation"
 authors = ["Tea"]
 edition = "2021"
