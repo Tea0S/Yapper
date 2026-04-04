@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
 
   type HudPhase = "hidden" | "idle" | "listening" | "transcribing";
@@ -8,6 +9,7 @@
   let phase = $state<HudPhase>("idle");
   let mic = $state<MicLevel>({ rms: 0, peak: 0 });
   let pttHint = $state("Push-to-talk");
+  let toggleMicHint = $state("");
 
   const dotCount = 9;
 
@@ -45,13 +47,67 @@
     }
   }
 
+  /** Click without much movement opens Yapper; past threshold we start a native window drag (Windows). */
+  const DRAG_THRESHOLD_PX = 6;
+  let pillPointerDown = false;
+  let pillStartX = 0;
+  let pillStartY = 0;
+  let pillDragStarted = false;
+
+  function onPillPointerDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    pillPointerDown = true;
+    pillDragStarted = false;
+    pillStartX = e.clientX;
+    pillStartY = e.clientY;
+    (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
+  }
+
+  function onPillPointerMove(e: PointerEvent) {
+    if (!pillPointerDown || (e.buttons & 1) === 0) return;
+    const dx = e.clientX - pillStartX;
+    const dy = e.clientY - pillStartY;
+    if (!pillDragStarted && dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
+      pillDragStarted = true;
+      void getCurrentWindow()
+        .startDragging()
+        .catch(() => {});
+    }
+  }
+
+  function onPillPointerUp(e: PointerEvent) {
+    if (e.button !== 0) return;
+    pillPointerDown = false;
+    try {
+      (e.currentTarget as HTMLButtonElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+    if (!pillDragStarted) {
+      void openYapper();
+    }
+  }
+
+  function onPillPointerCancel() {
+    pillPointerDown = false;
+  }
+
+  function onPillKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      void openYapper();
+    }
+  }
+
   onMount(() => {
     let dead = false;
     void invoke<{ action: string; shortcut: string }[]>("list_keybinds_cmd")
       .then((rows) => {
         if (dead) return;
-        const row = rows.find((r) => r.action === "push_to_talk" && r.shortcut.trim());
-        if (row) pttHint = formatShortcut(row.shortcut);
+        const ptt = rows.find((r) => r.action === "push_to_talk" && r.shortcut.trim());
+        if (ptt) pttHint = formatShortcut(ptt.shortcut);
+        const tom = rows.find((r) => r.action === "toggle_open_mic" && r.shortcut.trim());
+        if (tom) toggleMicHint = formatShortcut(tom.shortcut);
       })
       .catch(() => {});
 
@@ -86,14 +142,23 @@
       <span class="tip-line"
         >Hold <strong class="accent">{pttHint}</strong> to dictate · release to transcribe</span
       >
-      <span class="tip-sub">Click to open Yapper</span>
+      {#if toggleMicHint}
+        <span class="tip-line tip-gap"
+          >Press <strong class="accent">{toggleMicHint}</strong> to toggle open mic</span
+        >
+      {/if}
+      <span class="tip-sub">Click to open Yapper · drag to move the widget</span>
     </div>
     <button
       type="button"
       class="pill"
       class:expanded
-      onclick={openYapper}
-      aria-label="Open Yapper"
+      aria-label="Open Yapper — or drag to move"
+      onpointerdown={onPillPointerDown}
+      onpointermove={onPillPointerMove}
+      onpointerup={onPillPointerUp}
+      onpointercancel={onPillPointerCancel}
+      onkeydown={onPillKeydown}
     >
       {#if expanded}
         <div class="dots" aria-hidden="true">
@@ -118,20 +183,25 @@
     background: transparent !important;
     margin: 0;
     min-height: 100%;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .hud-root {
     box-sizing: border-box;
-    min-height: 100vh;
+    min-height: 100%;
     width: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: flex-end;
-    padding: 4px 6px 10px;
+    padding: 8px 6px 10px;
     font-family: "DM Sans", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
+    overflow: visible;
+  }
+
+  .hud-root * {
+    box-sizing: border-box;
   }
 
   .stack {
@@ -140,6 +210,9 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
+    width: 100%;
+    max-width: 100%;
+    overflow: visible;
   }
 
   .stack:hover .tooltip {
@@ -151,7 +224,8 @@
     bottom: calc(100% + 10px);
     left: 50%;
     transform: translateX(-50%);
-    max-width: min(280px, 85vw);
+    width: max-content;
+    max-width: min(300px, 100%);
     padding: 9px 14px;
     border-radius: 10px;
     font-size: 12px;
@@ -166,11 +240,17 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.16s ease;
-    z-index: 2;
+    z-index: 10;
+    white-space: normal;
+    word-wrap: break-word;
   }
 
   .tip-line {
     display: block;
+  }
+
+  .tip-gap {
+    margin-top: 6px;
   }
 
   .tip-sub {
@@ -189,9 +269,9 @@
   .pill {
     margin: 0;
     padding: 0;
-    border: none;
-    background: transparent;
-    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: grab;
     border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.38);
     background: rgba(6, 8, 10, 0.45);
@@ -207,6 +287,12 @@
     min-width: 72px;
     min-height: 22px;
     padding: 5px 14px;
+    outline: none;
+  }
+
+  .pill:focus-visible {
+    outline: 2px solid rgba(232, 180, 212, 0.65);
+    outline-offset: 2px;
   }
 
   .pill:hover {
@@ -214,10 +300,17 @@
     background: rgba(10, 12, 16, 0.55);
   }
 
+  .pill:active {
+    cursor: grabbing;
+  }
+
   .pill.expanded {
-    min-width: 236px;
+    align-self: stretch;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     min-height: 36px;
-    padding: 10px 20px;
+    padding: 8px 10px;
   }
 
   .idle-cap {
@@ -232,12 +325,16 @@
     display: flex;
     align-items: flex-end;
     justify-content: center;
-    gap: 5px;
+    gap: 4px;
     height: 22px;
+    width: 100%;
+    max-width: 100%;
+    padding: 0 2px;
   }
 
   .dot {
     width: 4px;
+    flex-shrink: 0;
     height: 18px;
     border-radius: 2px;
     background: rgba(255, 255, 255, 0.88);

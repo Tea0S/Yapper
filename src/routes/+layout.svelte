@@ -52,6 +52,10 @@
 
   onMount(() => {
     let cancelled = false;
+    /** Native webview context menus (reload, devtools, etc.) feel broken in a desktop shell. */
+    const blockContextMenu = (e: Event) => e.preventDefault();
+    window.addEventListener("contextmenu", blockContextMenu, { capture: true });
+
     void reapplyWindowIconFromBundle();
     const iconResync = window.setTimeout(() => void reapplyWindowIconFromBundle(), 800);
     void loadInstanceTag();
@@ -63,6 +67,7 @@
     if (typeof window !== "undefined" && window.location.pathname === "/hud") {
       return () => {
         cancelled = true;
+        window.removeEventListener("contextmenu", blockContextMenu, { capture: true });
         window.clearTimeout(iconResync);
       };
     }
@@ -77,6 +82,7 @@
     })();
     return () => {
       cancelled = true;
+      window.removeEventListener("contextmenu", blockContextMenu, { capture: true });
       window.clearTimeout(iconResync);
       void unregisterAll();
     };

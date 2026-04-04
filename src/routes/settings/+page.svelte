@@ -69,6 +69,7 @@
   let micNormalizePeak = $state("0.88");
   let micMaxGain = $state("12");
   let lazyLoadWhisper = $state(false);
+  let hudWidgetEnabled = $state(true);
   let modelIdleUnloadMins = $state("0");
 
   let whisperBeamSize = $state("5");
@@ -209,6 +210,8 @@
     }
     lazyLoadWhisper =
       (await invoke<string | null>("get_setting_cmd", { key: "lazy_load_whisper" })) === "true";
+    hudWidgetEnabled =
+      (await invoke<string | null>("get_setting_cmd", { key: "hud_widget_enabled" })) !== "false";
     modelIdleUnloadMins =
       (await invoke<string | null>("get_setting_cmd", { key: "model_idle_unload_mins" })) ?? "0";
 
@@ -533,6 +536,27 @@
       key: "whisper_vad_filter_file",
       value: whisperVadFilterFile ? "true" : "false",
     });
+    await invoke("set_setting_cmd", {
+      key: "hud_widget_enabled",
+      value: hudWidgetEnabled ? "true" : "false",
+    });
+    try {
+      await invoke("hud_sync_visibility_cmd");
+    } catch {
+      /* ignore if not running under Tauri */
+    }
+  }
+
+  async function persistHudWidget() {
+    try {
+      await invoke("set_setting_cmd", {
+        key: "hud_widget_enabled",
+        value: hudWidgetEnabled ? "true" : "false",
+      });
+      await invoke("hud_sync_visibility_cmd");
+    } catch {
+      /* ignore */
+    }
   }
 
   async function saveMicrophoneOnly() {
@@ -1201,6 +1225,22 @@
       </select>
     </div>
     <button type="button" class="btn" onclick={saveCore}>Save style</button>
+  </div>
+
+  <div class="panel block">
+    <h2>Desktop widget</h2>
+    <p class="muted short">
+      Small on-screen bar for dictation shortcuts when the inference engine is on. Turning it off does not stop the engine
+      or global hotkeys.
+    </p>
+    <label class="check">
+      <input
+        type="checkbox"
+        bind:checked={hudWidgetEnabled}
+        onchange={() => void persistHudWidget()}
+      />
+      Show desktop dictation widget
+    </label>
   </div>
 
   <div class="panel block">

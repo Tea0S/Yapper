@@ -166,6 +166,7 @@ pub async fn yapper_node_start(
         .kill_on_drop(true)
         .env("PYTHONUNBUFFERED", "1");
 
+    crate::win_spawn::hide_console_tokio_python(&mut cmd, &python);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start Yapper Node ({python}): {e}"))?;

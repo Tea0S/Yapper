@@ -28,6 +28,7 @@ commands.allow = [
   "get_mic_input_level",
   "install_nvidia_whisper_libs",
   "hud_snapshot",
+  "hud_sync_visibility_cmd",
   "focus_main_window",
   "sync_windows_taskbar_icon",
   "yapper_node_status",

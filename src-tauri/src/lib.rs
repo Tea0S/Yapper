@@ -11,6 +11,7 @@ mod sidecar;
 mod state;
 mod trace_log;
 mod node_server;
+mod win_spawn;
 #[cfg(windows)]
 mod win_taskbar_icon;
 
@@ -104,7 +105,47 @@ fn inference_model_for_init(conn: &rusqlite::Connection) -> rusqlite::Result<Str
         Ok(get_setting(conn, "whisper_model")?.unwrap_or_else(|| "base".into()))
     }
 }
-use tauri::{Emitter, Manager, State};
+use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, Runtime, State, Url};
+
+/// Dev server, `tauri://`, and packaged `https://tauri.localhost` (and loopback IPs).
+pub(crate) fn allow_in_app_navigation(url: &Url) -> bool {
+    match url.scheme() {
+        "tauri" => true,
+        "about" => matches!(url.path(), "" | "blank"),
+        "http" | "https" => {
+            if let Some(host) = url.host_str() {
+                if host.eq_ignore_ascii_case("localhost") || host == "tauri.localhost" {
+                    return true;
+                }
+                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                    return ip.is_loopback();
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// `true` keeps navigation inside the webview; `false` cancels it and opens http(s)/mailto externally.
+pub(crate) fn allow_navigation_in_webview(url: &Url) -> bool {
+    if allow_in_app_navigation(url) {
+        return true;
+    }
+    if matches!(url.scheme(), "http" | "https" | "mailto") {
+        let _ = open::that(url.as_str());
+        return false;
+    }
+    true
+}
+
+pub(crate) fn handle_new_window_request<R: Runtime>(url: Url) -> NewWindowResponse<R> {
+    if !allow_in_app_navigation(&url) && matches!(url.scheme(), "http" | "https" | "mailto") {
+        let _ = open::that(url.as_str());
+    }
+    NewWindowResponse::Deny
+}
 
 struct ClearPttSession(Arc<AtomicBool>);
 impl Drop for ClearPttSession {
@@ -642,7 +683,9 @@ async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     let whisper_dev_pref = get_setting(&conn, "whisper_device")
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| "auto".into());
-    let cuda = std::process::Command::new("nvidia-smi")
+    let mut cuda_cmd = std::process::Command::new("nvidia-smi");
+    crate::win_spawn::hide_console(&mut cuda_cmd);
+    let cuda = cuda_cmd
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -1183,6 +1226,25 @@ fn hud_snapshot(state: State<'_, AppState>) -> Result<HudSnapshot, String> {
     Ok(HudSnapshot { phase: *g })
 }
 
+/// Apply `hud_widget_enabled` and whether the engine is running — show, hide, or keep hidden.
+#[tauri::command]
+async fn hud_sync_visibility_cmd(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if !hud::widget_enabled(&app)? {
+        hud::hide(&app);
+        return Ok(());
+    }
+    let running = state.sidecar.lock().await.is_some() || state.remote.lock().await.is_some();
+    if running {
+        hud::ensure_collapsed_visible(&app)
+    } else {
+        hud::hide(&app);
+        Ok(())
+    }
+}
+
 #[tauri::command]
 fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let w = app
@@ -1212,8 +1274,9 @@ fn sync_windows_taskbar_icon(app: tauri::AppHandle) {
 
 #[tauri::command]
 async fn cuda_available() -> bool {
-    std::process::Command::new("nvidia-smi")
-        .output()
+    let mut cmd = std::process::Command::new("nvidia-smi");
+    crate::win_spawn::hide_console(&mut cmd);
+    cmd.output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -1252,6 +1315,18 @@ pub fn run() {
 
             let state = AppState::new(tone_dir.clone(), audio::PttController::spawn());
             app.manage(state);
+
+            let main_cfg = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .ok_or_else(|| "tauri.conf.json must define a window labeled \"main\"")?;
+            WebviewWindowBuilder::from_config(app.handle(), main_cfg)?
+                .on_navigation(|url| allow_navigation_in_webview(url))
+                .on_new_window(|url, _| handle_new_window_request(url))
+                .build()?;
 
             let show_i = MenuItem::with_id(app, "show", "Show Yapper", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -1328,6 +1403,7 @@ pub fn run() {
             get_mic_input_level,
             install_nvidia_whisper_libs,
             hud_snapshot,
+            hud_sync_visibility_cmd,
             focus_main_window,
             sync_windows_taskbar_icon,
             node_server::yapper_node_status,

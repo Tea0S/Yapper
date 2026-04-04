@@ -1,6 +1,6 @@
 [package]
 name = "yapper"
-version = "1.0.5"
+version = "1.0.7"
 description = "Yapper — local-first dictation"
 authors = ["Tea"]
 edition = "2021"
@@ -36,6 +36,7 @@ sevenz-rust = "0.6"
 rubato = "2.0.0"
 audioadapter-buffers = "3"
 local-ip-address = "0.6"
+open = "5"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

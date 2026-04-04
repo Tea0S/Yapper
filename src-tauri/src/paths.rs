@@ -22,6 +22,10 @@ pub fn model_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Embeddable interpreter from `src-tauri/resources/python-runtime/` (bundled as `$RESOURCE/resources/...`).
+///
+/// Prefer **`pythonw.exe`** when present (same folder as `python.exe`). It avoids a console window and
+/// avoids Windows quirks where `CREATE_NO_WINDOW` + `python.exe` (console subsystem) can break piped
+/// stdin/stdout (dictation then fails with "pipe is being closed" / os error 232).
 pub fn bundled_python_exe(app: &tauri::AppHandle) -> Option<PathBuf> {
     let candidates = [
         // Matches `bundle.resources` entry `resources/**/*`
@@ -38,6 +42,12 @@ pub fn bundled_python_exe(app: &tauri::AppHandle) -> Option<PathBuf> {
     ];
     for p in candidates.into_iter().flatten() {
         if p.is_file() {
+            if let Some(dir) = p.parent() {
+                let w = dir.join("pythonw.exe");
+                if w.is_file() {
+                    return Some(w);
+                }
+            }
             return Some(p);
         }
     }

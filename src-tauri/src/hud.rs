@@ -6,10 +6,19 @@ use tauri::{
 
 pub const LABEL: &str = "hud";
 
-/// Collapsed “always there” capsule — height fits hover tooltip inside the webview.
-const SIZE_COLLAPSED: (f64, f64) = (112.0, 88.0);
-/// Wider meter while dictating / transcribing (same height so tooltips are not clipped).
-const SIZE_EXPANDED: (f64, f64) = (268.0, 88.0);
+/// Desktop HUD pill is shown when `hud_widget_enabled` is not `"false"` (default on).
+pub(crate) fn widget_enabled(app: &AppHandle) -> Result<bool, String> {
+    let conn = crate::open_db(app)?;
+    let v = crate::db::get_setting(&conn, "hud_widget_enabled").map_err(|e| e.to_string())?;
+    Ok(v.as_deref() != Some("false"))
+}
+
+/// Collapsed “always there” capsule — height includes space above the pill for the hover tooltip.
+const SIZE_COLLAPSED: (f64, f64) = (112.0, 168.0);
+/// Extra width when the meter is active (logical px).
+const EXPAND_DELTA_W: f64 = 40.0;
+/// Slightly wider while dictating / transcribing.
+const SIZE_EXPANDED: (f64, f64) = (SIZE_COLLAPSED.0 + EXPAND_DELTA_W, SIZE_COLLAPSED.1);
 
 fn hud_url(app: &AppHandle) -> Result<Url, String> {
     let main = app
@@ -20,6 +29,22 @@ fn hud_url(app: &AppHandle) -> Result<Url, String> {
     u.set_query(None);
     u.set_fragment(None);
     Ok(u)
+}
+
+/// Resize HUD and shift **X** so the window’s horizontal center stays fixed (logical size → may change outer px).
+fn set_logical_size_keep_hcenter(win: &WebviewWindow, lw: f64, lh: f64) -> Result<(), String> {
+    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    let old_sz = win.outer_size().map_err(|e| e.to_string())?;
+    let center_x = pos.x + old_sz.width as i32 / 2;
+
+    win.set_size(LogicalSize::new(lw, lh))
+        .map_err(|e| e.to_string())?;
+
+    let new_sz = win.outer_size().map_err(|e| e.to_string())?;
+    let new_x = center_x - new_sz.width as i32 / 2;
+    win.set_position(PhysicalPosition::new(new_x, pos.y))
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn position_bottom_center(win: &WebviewWindow) -> Result<(), String> {
@@ -60,17 +85,23 @@ fn build_hud_window(app: &AppHandle, url: Url) -> Result<WebviewWindow, String> 
         builder = builder.transparent(false);
     }
 
-    builder.build().map_err(|e| e.to_string())
+    builder
+        .on_navigation(|url| crate::allow_navigation_in_webview(url))
+        .on_new_window(|url, _| crate::handle_new_window_request(url))
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 /// Create or refresh the HUD as a small bottom pill (engine running).
 pub fn ensure_collapsed_visible(app: &AppHandle) -> Result<(), String> {
+    if !widget_enabled(app)? {
+        hide(app);
+        return Ok(());
+    }
     let url = hud_url(app)?;
     if let Some(w) = app.get_webview_window(LABEL) {
         w.navigate(url).map_err(|e| e.to_string())?;
-        w.set_size(LogicalSize::new(SIZE_COLLAPSED.0, SIZE_COLLAPSED.1))
-            .map_err(|e| e.to_string())?;
-        position_bottom_center(&w)?;
+        set_logical_size_keep_hcenter(&w, SIZE_COLLAPSED.0, SIZE_COLLAPSED.1)?;
         w.show().map_err(|e| e.to_string())?;
         let _ = w.set_always_on_top(true);
         return Ok(());
@@ -84,6 +115,9 @@ pub fn ensure_collapsed_visible(app: &AppHandle) -> Result<(), String> {
 }
 
 pub fn set_expanded(app: &AppHandle, expanded: bool) -> Result<(), String> {
+    if !widget_enabled(app)? {
+        return Ok(());
+    }
     let w = app
         .get_webview_window(LABEL)
         .ok_or_else(|| "hud window missing".to_string())?;
@@ -92,9 +126,7 @@ pub fn set_expanded(app: &AppHandle, expanded: bool) -> Result<(), String> {
     } else {
         SIZE_COLLAPSED
     };
-    w.set_size(LogicalSize::new(lw, lh))
-        .map_err(|e| e.to_string())?;
-    position_bottom_center(&w)?;
+    set_logical_size_keep_hcenter(&w, lw, lh)?;
     Ok(())
 }
 

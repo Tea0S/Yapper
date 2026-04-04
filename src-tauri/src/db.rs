@@ -93,6 +93,7 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         ("node_server_bind", "lan"),
         ("node_server_port", "8765"),
         ("node_server_token", ""),
+        ("hud_widget_enabled", "true"),
     ] {
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",

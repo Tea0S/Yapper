@@ -1,6 +1,7 @@
 use crate::trace_log::ipc_log;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -234,6 +235,7 @@ impl SidecarSession {
                 }
             }
         }
+        crate::win_spawn::hide_console_tokio_python(&mut cmd, python);
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("spawn sidecar: {e}"))?;
@@ -293,15 +295,25 @@ impl SidecarSession {
         })
     }
 
+    fn map_pipe_write_err(e: io::Error) -> String {
+        #[cfg(windows)]
+        if e.raw_os_error() == Some(232) {
+            return "The inference process closed its input pipe (often it exited or crashed). Restart the engine from Home or Settings.".into();
+        }
+        e.to_string()
+    }
+
     pub async fn send(&self, msg: &SidecarIn) -> Result<(), String> {
         let line = serde_json::to_string(msg).map_err(|e| e.to_string())?;
         let mut w = self.writer.lock().await;
         tokio::time::timeout(Duration::from_secs(120), async {
             w.write_all(line.as_bytes())
                 .await
-                .map_err(|e| e.to_string())?;
-            w.write_all(b"\n").await.map_err(|e| e.to_string())?;
-            w.flush().await.map_err(|e| e.to_string())?;
+                .map_err(Self::map_pipe_write_err)?;
+            w.write_all(b"\n")
+                .await
+                .map_err(Self::map_pipe_write_err)?;
+            w.flush().await.map_err(Self::map_pipe_write_err)?;
             Ok::<(), String>(())
         })
         .await
@@ -417,7 +429,9 @@ fn system_python_fallback() -> String {
     #[cfg(windows)]
     {
         for ver in ["-3.12", "-3.11", "-3.10"] {
-            let out = std::process::Command::new("py")
+            let mut py_cmd = std::process::Command::new("py");
+            crate::win_spawn::hide_console(&mut py_cmd);
+            let out = py_cmd
                 .args([ver, "-c", "import sys; print(sys.executable)"])
                 .output();
             if let Ok(o) = out {
