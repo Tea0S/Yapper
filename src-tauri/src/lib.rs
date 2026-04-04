@@ -548,8 +548,8 @@ fn delete_correction_cmd(app: tauri::AppHandle, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn paste_text(text: String) -> Result<(), String> {
-    paste::paste_text_at_focus(&text)
+fn paste_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    paste::paste_text_at_focus_on_main_thread(&app, text)
 }
 
 #[tauri::command]
@@ -1270,6 +1270,8 @@ fn sync_windows_taskbar_icon(app: tauri::AppHandle) {
         let _ = win.set_icon(icon.clone());
         win_taskbar_icon::apply_taskbar_big_icon(&win, &icon);
     }
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 #[tauri::command]

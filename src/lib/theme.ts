@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { setTheme as setNativeTheme } from "@tauri-apps/api/app";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export type UiTheme = "system" | "light" | "dark";
 
@@ -10,7 +11,19 @@ export function applyUiTheme(mode: UiTheme) {
   } else {
     root.setAttribute("data-theme", mode);
   }
+  const resolved = resolveUiTheme(mode);
+  root.style.colorScheme = resolved;
+  document.body.style.backgroundColor = resolved === "light" ? "#f4f2ee" : "#0e1114";
   void syncNativeTheme(mode);
+  void syncWindowBackground(resolved);
+}
+
+function resolveUiTheme(mode: UiTheme): "light" | "dark" {
+  if (mode !== "system") return mode;
+  if (typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: light)").matches) {
+    return "light";
+  }
+  return "dark";
 }
 
 async function syncNativeTheme(mode: UiTheme) {
@@ -22,6 +35,14 @@ async function syncNativeTheme(mode: UiTheme) {
     }
   } catch {
     /* Web dev or restricted context */
+  }
+}
+
+async function syncWindowBackground(mode: "light" | "dark") {
+  try {
+    await getCurrentWindow().setBackgroundColor(mode === "light" ? "#f4f2ee" : "#0e1114");
+  } catch {
+    /* Browser without Tauri or unsupported platform */
   }
 }
 

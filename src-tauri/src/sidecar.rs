@@ -445,5 +445,22 @@ fn system_python_fallback() -> String {
             }
         }
     }
+    #[cfg(not(windows))]
+    {
+        for cmd in ["python3", "python"] {
+            let out = std::process::Command::new(cmd)
+                .args(["-c", "import sys; print(sys.executable)"])
+                .output();
+            if let Ok(o) = out {
+                if o.status.success() {
+                    let s = String::from_utf8_lossy(&o.stdout);
+                    let exe = s.trim();
+                    if !exe.is_empty() {
+                        return exe.to_string();
+                    }
+                }
+            }
+        }
+    }
     "python".to_string()
 }

@@ -4,6 +4,21 @@
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      html,
+      body {
+        background: #0e1114;
+        color-scheme: dark;
+      }
+
+      @media (prefers-color-scheme: light) {
+        html,
+        body {
+          background: #f4f2ee;
+          color-scheme: light;
+        }
+      }
+    </style>
     <title>Yapper</title>
     %sveltekit.head%
   </head>
