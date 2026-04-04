@@ -85,9 +85,102 @@ def list_engines() -> list[str]:
 
 
 def _looks_like_incomplete_hf_whisper_cache(err: BaseException) -> bool:
-    """HF snapshot dir exists but model.bin never finished downloading (interrupt, AV, disk)."""
+    """True when weights look truncated (HF snapshot) — not permission/AV locks or unrelated I/O."""
     s = str(err).lower()
-    return "model.bin" in s or "unable to open file" in s
+    if any(
+        x in s
+        for x in (
+            "permission",
+            "access is denied",
+            "errno 13",
+            "operation not permitted",
+        )
+    ):
+        return False
+    # Require model.bin + typical CT2/HF missing-weight phrasing (avoid wiping cache on any "unable to open file").
+    if "model.bin" not in s:
+        return False
+    return any(
+        x in s
+        for x in (
+            "unable to open file",
+            "cannot open",
+            "failed to open",
+            "no such file",
+            "errno 2",
+            "does not exist",
+        )
+    )
+
+
+def _ct2_flat_path(download_root: str, model: str) -> Path:
+    """Real on-disk files for CT2 (no HF snapshot symlinks). Reliable on Windows + embeddable Python."""
+    safe = model.replace("/", "__").replace("\\", "_").strip() or "model"
+    return Path(download_root) / "_ct2_flat" / safe
+
+
+def _purge_ct2_flat(download_root: str, model: str) -> None:
+    import shutil
+
+    p = _ct2_flat_path(download_root, model)
+    if p.is_dir():
+        sys.stderr.write(f"yapper-sidecar: removing flat CT2 model dir: {p}\n")
+        sys.stderr.flush()
+        shutil.rmtree(p, ignore_errors=True)
+
+
+def _use_flat_ct2_download(model: str, download_root: Optional[str]) -> bool:
+    """Bundled installs use embeddable Python; HF hub cache symlinks often break there. Dev full-Python is fine."""
+    if not download_root or not model.strip():
+        return False
+    m = model.strip()
+    if os.path.isdir(m):
+        return False
+    if m.startswith(("/", "\\")) or (len(m) >= 2 and m[1] == ":"):
+        return False
+    return True
+
+
+def _purge_incomplete_snapshot_only(download_root: str, err: BaseException) -> bool:
+    """Remove only the snapshot dir named in the error, if it lives under download_root."""
+    import re
+    import shutil
+
+    root = Path(download_root)
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        root_resolved = root
+
+    s = str(err)
+    for pat in (
+        r"model\s+['\"]([^'\"]+)['\"]",
+        r"in model\s+['\"]([^'\"]+)['\"]",
+    ):
+        m = re.search(pat, s, re.I)
+        if not m:
+            continue
+        candidate = Path(m.group(1).strip())
+        try:
+            if not candidate.is_dir():
+                continue
+            cand_res = candidate.resolve()
+        except OSError:
+            continue
+        try:
+            cand_res.relative_to(root_resolved)
+        except ValueError:
+            continue
+        rel = str(cand_res).replace("\\", "/").lower()
+        if "snapshots" not in rel and "_ct2_flat" not in rel:
+            continue
+        sys.stderr.write(
+            f"yapper-sidecar: removing incomplete model dir (snapshot or flat copy): {cand_res}\n"
+        )
+        sys.stderr.flush()
+        shutil.rmtree(cand_res, ignore_errors=True)
+        return True
+    return False
 
 
 def _purge_hf_repo_cache(download_root: str, model_id: str) -> None:
@@ -99,12 +192,14 @@ def _purge_hf_repo_cache(download_root: str, model_id: str) -> None:
     try:
         import faster_whisper.utils as fwu
     except ImportError:
+        _purge_ct2_flat(download_root, model_id)
         return
     if re.match(r".*/.*", model_id):
         repo_id = model_id
     else:
         repo_id = fwu._MODELS.get(model_id)
     if not repo_id:
+        _purge_ct2_flat(download_root, model_id)
         return
     folder = Path(download_root) / f"models--{repo_id.replace('/', '--')}"
     if folder.is_dir():
@@ -113,31 +208,49 @@ def _purge_hf_repo_cache(download_root: str, model_id: str) -> None:
         )
         sys.stderr.flush()
         shutil.rmtree(folder, ignore_errors=True)
+    _purge_ct2_flat(download_root, model_id)
 
 
 def load_whisper(model: str, device: str, compute_type: str, model_dir: Optional[str]) -> None:
     global MODEL, MODEL_NAME
-    from pathlib import Path
-
     from faster_whisper import WhisperModel
+    from faster_whisper.utils import download_model
 
     download_root = model_dir or None
     dev = device if device in ("cuda", "cpu") else "cpu"
-    # Always stderr (not only YAPPER_VERBOSE): confirms weights path and that load ran.
+    flat_dir = _ct2_flat_path(download_root, model) if _use_flat_ct2_download(model, download_root) else None
+
     sys.stderr.write(
         f"yapper-sidecar: loading WhisperModel model_id={model!r} device={dev!r} "
-        f"compute_type={compute_type!r} download_root={download_root!r}\n"
+        f"compute_type={compute_type!r} download_root={download_root!r} "
+        f"flat_ct2={str(flat_dir) if flat_dir else 'off'}\n"
     )
     sys.stderr.flush()
 
     for attempt in range(2):
         try:
-            MODEL = WhisperModel(
-                model,
-                device=dev,
-                compute_type=compute_type,
-                download_root=download_root,
-            )
+            if flat_dir is not None:
+                assert download_root is not None
+                flat_dir.mkdir(parents=True, exist_ok=True)
+                if not (flat_dir / "model.bin").is_file():
+                    download_model(
+                        model,
+                        output_dir=str(flat_dir),
+                        cache_dir=download_root,
+                        local_files_only=False,
+                    )
+                MODEL = WhisperModel(
+                    str(flat_dir),
+                    device=dev,
+                    compute_type=compute_type,
+                )
+            else:
+                MODEL = WhisperModel(
+                    model,
+                    device=dev,
+                    compute_type=compute_type,
+                    download_root=download_root,
+                )
             break
         except Exception as e:
             if (
@@ -146,10 +259,11 @@ def load_whisper(model: str, device: str, compute_type: str, model_dir: Optional
                 and _looks_like_incomplete_hf_whisper_cache(e)
             ):
                 sys.stderr.write(
-                    f"yapper-sidecar: load failed ({e}); clearing HF cache entry and retrying once.\n"
+                    f"yapper-sidecar: load failed ({e}); clearing broken cache and retrying once.\n"
                 )
                 sys.stderr.flush()
-                _purge_hf_repo_cache(download_root, model)
+                if not _purge_incomplete_snapshot_only(download_root, e):
+                    _purge_hf_repo_cache(download_root, model)
                 continue
             raise
 
