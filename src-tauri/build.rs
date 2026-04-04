@@ -1,13 +1,7 @@
 fn main() {
-    // createUpdaterArtifacts requires minisign key in env; PATH alone is not enough for tauri-build.
-    // Load gitignored `.tauri/updater.key` so `cargo build` / rust-analyzer work without a shell wrapper.
-    if std::env::var("TAURI_SIGNING_PRIVATE_KEY").is_err() {
-        let key_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".tauri/updater.key");
-        if key_path.is_file() {
-            if let Ok(contents) = std::fs::read_to_string(&key_path) {
-                std::env::set_var("TAURI_SIGNING_PRIVATE_KEY", contents);
-            }
-        }
-    }
+    // Updater signing runs in the Tauri CLI bundler (separate process from this build script),
+    // so setting TAURI_SIGNING_PRIVATE_KEY here does not help `npm run tauri build`.
+    // Default config has createUpdaterArtifacts false. For signed release artifacts, use
+    // scripts/pack-with-updater-signing.* (loads .tauri/updater.key + merges tauri.updater-release.conf.json).
     tauri_build::build()
 }

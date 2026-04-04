@@ -31,7 +31,10 @@ if ($Release) {
     npm run bundle:python
 }
 
-$npxCli = @("tauri", "build")
+$npxCli = @(
+    "tauri", "build",
+    "-c", (Join-Path $RepoRoot "src-tauri/tauri.updater-release.conf.json")
+)
 if ($Debug) {
     $npxCli += "--debug"
 }

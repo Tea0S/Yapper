@@ -111,6 +111,13 @@ npm run tauri build
 
 For day-to-day dev you can still use a project venv and `YAPPER_PYTHON` instead of running this script every time.
 
+### Updater signing (optional)
+
+Plain `npm run tauri build` does **not** produce signed updater artifacts and does **not** need `TAURI_SIGNING_PRIVATE_KEY`. To build with `createUpdaterArtifacts` (e.g. for GitHub releases), place the minisign secret at `src-tauri/.tauri/updater.key` (gitignored), then:
+
+- **macOS:** `npm run pack:mac` or `npm run pack:release:mac` (runs `scripts/pack-with-updater-signing.sh`, which merges `src-tauri/tauri.updater-release.conf.json`).
+- **Windows:** existing `npm run pack` / `pack:release` (PowerShell script loads the same key file and uses the same merge).
+
 ## Windows installer (packaged app)
 
 ```bash

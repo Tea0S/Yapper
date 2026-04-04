@@ -18,7 +18,9 @@
     "pack": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-with-updater-signing.ps1",
     "pack:raw": "tauri build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-latest-json.ps1",
     "pack:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-with-updater-signing.ps1 -Release",
-    "pack:debug": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-with-updater-signing.ps1 -Debug"
+    "pack:debug": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-with-updater-signing.ps1 -Debug",
+    "pack:mac": "bash scripts/pack-with-updater-signing.sh",
+    "pack:release:mac": "bash scripts/pack-with-updater-signing.sh --release"
   },
   "license": "MIT",
   "dependencies": {
