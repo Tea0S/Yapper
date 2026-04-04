@@ -1,7 +1,9 @@
-# Writes updater static manifest latest.json next to the NSIS bundle after `tauri build`.
+# Writes updater static manifest latest.json after `tauri build`.
+# Emits Tauri v2 platform keys so MSI and NSIS installs each get the matching URL + signature:
+#   windows-x86_64-msi, windows-x86_64-nsis, and windows-x86_64 (fallback / dev).
 # Reads version + GitHub owner/repo from src-tauri/tauri.conf.json (plugins.updater.endpoints).
-# Override installer URL: $env:YAPPER_INSTALLER_DOWNLOAD_URL = 'https://.../file.exe'
-# If Git tag != version (e.g. tag v1.0.4 but version 1.0.4): $env:YAPPER_RELEASE_TAG = 'v1.0.4'
+# Overrides: $env:YAPPER_INSTALLER_DOWNLOAD_URL (NSIS .exe), $env:YAPPER_MSI_INSTALLER_DOWNLOAD_URL (.msi)
+# Release tag: $env:YAPPER_RELEASE_TAG when it differs from tauri.conf version
 param(
     [ValidateSet("release", "debug")]
     [string]$Profile = "release"
@@ -12,6 +14,7 @@ $RepoRoot = Split-Path $PSScriptRoot -Parent
 $TauriDir = Join-Path $RepoRoot "src-tauri"
 $ConfPath = Join-Path $TauriDir "tauri.conf.json"
 $NsisDir = Join-Path $TauriDir "target\$Profile\bundle\nsis"
+$MsiDir = Join-Path $TauriDir "target\$Profile\bundle\msi"
 
 if (-not (Test-Path -LiteralPath $ConfPath)) {
     Write-Error "Missing $ConfPath"
@@ -37,46 +40,87 @@ if (-not $exe) {
     Write-Error "No *_x64-setup.exe under $NsisDir"
 }
 
-$sigPath = "$($exe.FullName).sig"
-if (-not (Test-Path -LiteralPath $sigPath)) {
-    Write-Error "Missing signature file: $sigPath (createUpdaterArtifacts + signing key required)"
+$nsisSigPath = "$($exe.FullName).sig"
+if (-not (Test-Path -LiteralPath $nsisSigPath)) {
+    Write-Error "Missing signature file: $nsisSigPath (createUpdaterArtifacts + signing key required)"
+}
+$nsisSignature = [System.IO.File]::ReadAllText($nsisSigPath)
+
+$msi = $null
+$msiSignature = $null
+if (Test-Path -LiteralPath $MsiDir) {
+    $msi = Get-ChildItem -LiteralPath $MsiDir -Filter "Yapper_${version}_x64*.msi" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if (-not $msi) {
+        $msi = Get-ChildItem -LiteralPath $MsiDir -Filter "*.msi" -File |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+    }
+    if ($msi) {
+        $msiSigPath = "$($msi.FullName).sig"
+        if (-not (Test-Path -LiteralPath $msiSigPath)) {
+            Write-Error "Missing signature file: $msiSigPath (createUpdaterArtifacts + signing key required)"
+        }
+        $msiSignature = [System.IO.File]::ReadAllText($msiSigPath)
+    }
 }
 
-$signature = [System.IO.File]::ReadAllText($sigPath)
+$endpoint = $conf.plugins.updater.endpoints[0]
+if (-not $endpoint) {
+    Write-Error "No plugins.updater.endpoints[0] in tauri.conf.json"
+}
+if ($endpoint -notmatch "github\.com/([^/]+)/([^/]+)") {
+    Write-Error "Could not parse owner/repo from endpoint: $endpoint. Set YAPPER_INSTALLER_DOWNLOAD_URL / YAPPER_MSI_INSTALLER_DOWNLOAD_URL."
+}
+$owner = $Matches[1]
+$repo = $Matches[2]
+$tag = if ($env:YAPPER_RELEASE_TAG) { $env:YAPPER_RELEASE_TAG } else { $version }
 
-$installerUrl = $env:YAPPER_INSTALLER_DOWNLOAD_URL
-if (-not $installerUrl) {
-    $endpoint = $conf.plugins.updater.endpoints[0]
-    if (-not $endpoint) {
-        Write-Error "No plugins.updater.endpoints[0] in tauri.conf.json; set YAPPER_INSTALLER_DOWNLOAD_URL"
+$nsisUrl = if ($env:YAPPER_INSTALLER_DOWNLOAD_URL) { $env:YAPPER_INSTALLER_DOWNLOAD_URL } else {
+    "https://github.com/$owner/$repo/releases/download/$tag/$($exe.Name)"
+}
+$msiUrl = $null
+if ($msi) {
+    $msiUrl = if ($env:YAPPER_MSI_INSTALLER_DOWNLOAD_URL) { $env:YAPPER_MSI_INSTALLER_DOWNLOAD_URL } else {
+        "https://github.com/$owner/$repo/releases/download/$tag/$($msi.Name)"
     }
-    if ($endpoint -notmatch "github\.com/([^/]+)/([^/]+)") {
-        Write-Error "Could not parse owner/repo from endpoint: $endpoint. Set YAPPER_INSTALLER_DOWNLOAD_URL."
-    }
-    $owner = $Matches[1]
-    $repo = $Matches[2]
-    # Must match the GitHub release tag exactly (many repos use "1.0.4", not "v1.0.4").
-    # Override when your tag differs from tauri.conf version: $env:YAPPER_RELEASE_TAG = 'v1.0.4'
-    $tag = if ($env:YAPPER_RELEASE_TAG) { $env:YAPPER_RELEASE_TAG } else { $version }
-    $installerUrl = "https://github.com/$owner/$repo/releases/download/$tag/$($exe.Name)"
 }
 
 $pubDate = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss\Z")
+
+$platforms = [ordered]@{}
+if ($msi -and $msiSignature -and $msiUrl) {
+    $platforms["windows-x86_64-msi"] = [ordered]@{
+        signature = $msiSignature
+        url       = $msiUrl
+    }
+}
+$platforms["windows-x86_64-nsis"] = [ordered]@{
+    signature = $nsisSignature
+    url       = $nsisUrl
+}
+# Fallback when bundle type is unknown (e.g. some dev runs); match NSIS as default download.
+$platforms["windows-x86_64"] = [ordered]@{
+    signature = $nsisSignature
+    url       = $nsisUrl
+}
 
 $manifest = [ordered]@{
     version   = $version
     notes     = ""
     pub_date  = $pubDate
-    platforms = [ordered]@{
-        "windows-x86_64" = [ordered]@{
-            signature = $signature
-            url       = $installerUrl
-        }
-    }
+    platforms = $platforms
 }
 
-$json = ($manifest | ConvertTo-Json -Depth 5 -Compress)
-$outPath = Join-Path $NsisDir "latest.json"
+$json = ($manifest | ConvertTo-Json -Depth 6 -Compress)
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-[System.IO.File]::WriteAllText($outPath, $json + "`n", $utf8NoBom)
-Write-Host "Wrote $outPath" -ForegroundColor Green
+$outNsis = Join-Path $NsisDir "latest.json"
+[System.IO.File]::WriteAllText($outNsis, $json + "`n", $utf8NoBom)
+Write-Host "Wrote $outNsis" -ForegroundColor Green
+
+if ($msi) {
+    $outMsi = Join-Path $MsiDir "latest.json"
+    [System.IO.File]::WriteAllText($outMsi, $json + "`n", $utf8NoBom)
+    Write-Host "Wrote $outMsi" -ForegroundColor Green
+}

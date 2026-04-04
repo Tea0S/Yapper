@@ -8,7 +8,7 @@
     "core:app:allow-set-app-theme",
     "core:app:allow-default-window-icon",
     "core:window:allow-set-icon",
-    "allow-sync-windows-taskbar-icon",
+    "allow-yapper-invoke",
     "dialog:default",
     "global-shortcut:default",
     "updater:default",
