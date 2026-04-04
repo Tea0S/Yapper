@@ -52,6 +52,15 @@ function readSig(filePath) {
   return fs.readFileSync(sigPath, "utf8");
 }
 
+/** Prefer Tauri’s macOS updater bundle (`*.app.tar.gz`) over DMG when both exist. */
+function darwinBundlePreference(fileName) {
+  const n = fileName.toLowerCase();
+  if (n.endsWith(".app.tar.gz")) return 3;
+  if (n.endsWith(".tar.gz")) return 2;
+  if (n.endsWith(".dmg")) return 1;
+  return 0;
+}
+
 function partialWindows(profile) {
   const conf = readConf();
   const version = conf.version;
@@ -122,34 +131,55 @@ function partialDarwin(profile) {
   const tag = releaseTag(version);
   const bundleRoot = path.join(ROOT, "src-tauri", "target", profile, "bundle");
 
-  const candidates = [];
-  for (const sub of ["dmg", "macos"]) {
-    const dir = path.join(bundleRoot, sub);
+  // Tauri v2 + createUpdaterArtifacts: macOS updater is signed `*.app.tar.gz` in bundle/macos/
+  // with `*.app.tar.gz.sig`. DMGs under bundle/dmg/ are for distribution and are not minisigned.
+  const searchDirs = [path.join(bundleRoot, "macos"), path.join(bundleRoot, "dmg")];
+
+  /** @type {Array<{ name: string; sigText: string; pref: number }>} */
+  const rows = [];
+
+  for (const dir of searchDirs) {
     if (!fs.existsSync(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
-      if (name.endsWith(".dmg") || name.endsWith(".tar.gz") || name.endsWith(".zip")) {
-        if (name.endsWith(".sig")) continue;
-        candidates.push(path.join(dir, name));
+      if (!name.endsWith(".sig")) continue;
+      const baseName = name.replace(/\.sig$/i, "");
+      if (!baseName) continue;
+      const basePath = path.join(dir, baseName);
+      if (!fs.existsSync(basePath) || !fs.statSync(basePath).isFile()) {
+        continue;
       }
+      const sigPath = path.join(dir, name);
+      rows.push({
+        name: baseName,
+        sigText: fs.readFileSync(sigPath, "utf8"),
+        pref: darwinBundlePreference(baseName),
+      });
     }
   }
 
-  if (candidates.length === 0) {
-    throw new Error(`No .dmg / .tar.gz updater bundle under ${bundleRoot}/{dmg,macos}`);
+  if (rows.length === 0) {
+    throw new Error(
+      `No minisign *.sig next to an updater bundle under ${bundleRoot}/macos (expected e.g. *.app.tar.gz.sig). ` +
+        "Ensure tauri build uses createUpdaterArtifacts: true and TAURI_SIGNING_PRIVATE_KEY is set."
+    );
   }
 
   /** @type {Record<string, { signature: string; url: string }>} */
   const platforms = {};
+  const byKey = new Map();
 
-  for (const filePath of candidates) {
-    const name = path.basename(filePath);
-    const key = darwinPlatformKey(name);
-    if (platforms[key]) {
-      throw new Error(`Duplicate Darwin platform ${key} for ${name}; only one bundle per arch supported.`);
+  for (const row of rows) {
+    const key = darwinPlatformKey(row.name);
+    const prev = byKey.get(key);
+    if (!prev || row.pref > prev.pref) {
+      byKey.set(key, row);
     }
+  }
+
+  for (const [key, row] of byKey) {
     platforms[key] = {
-      signature: readSig(filePath),
-      url: assetUrl(owner, repo, tag, name),
+      signature: row.sigText,
+      url: assetUrl(owner, repo, tag, row.name),
     };
   }
 
