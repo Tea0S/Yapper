@@ -135,8 +135,6 @@
               ></span>
             {/each}
           </div>
-        {:else}
-          <span class="idle-cap" aria-hidden="true"></span>
         {/if}
       </button>
     </div>
@@ -258,16 +256,8 @@
     width: 100%;
     height: 100%;
     min-width: 0;
-    min-height: 36px;
-    padding: 0 20px;
-  }
-
-  .idle-cap {
-    display: block;
-    width: 44px;
-    height: 3px;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.2);
+    min-height: 32px;
+    padding: 0 14px;
   }
 
   .dots {
@@ -276,6 +266,11 @@
     justify-content: center;
     gap: 5px;
     height: 22px;
+  }
+
+  .pill.macos .dots {
+    gap: 4px;
+    height: 20px;
   }
 
   .dot {
@@ -287,6 +282,11 @@
     transform-origin: center bottom;
     transition: transform 0.06s ease-out, opacity 0.2s ease;
     opacity: 0.92;
+  }
+
+  .pill.macos .dot {
+    width: 4px;
+    height: 16px;
   }
 
   .dot.busy {

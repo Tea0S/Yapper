@@ -11,11 +11,11 @@ pub const LABEL: &str = "hud";
 const SIZE_COLLAPSED: (f64, f64) = (112.0, 88.0);
 #[cfg(target_os = "macos")]
 const SIZE_COLLAPSED: (f64, f64) = (112.0, 36.0);
-/// Wider meter while dictating / transcribing (same height so tooltips are not clipped).
+/// macOS keeps a fixed-width pill and only grows slightly taller while active.
 #[cfg(not(target_os = "macos"))]
 const SIZE_EXPANDED: (f64, f64) = (268.0, 88.0);
 #[cfg(target_os = "macos")]
-const SIZE_EXPANDED: (f64, f64) = (268.0, 44.0);
+const SIZE_EXPANDED: (f64, f64) = (112.0, 40.0);
 
 fn hud_url(app: &AppHandle) -> Result<Url, String> {
     let main = app
