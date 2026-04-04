@@ -6,6 +6,9 @@
   "permissions": [
     "core:default",
     "core:app:allow-set-app-theme",
+    "core:app:allow-default-window-icon",
+    "core:window:allow-set-icon",
+    "allow-sync-windows-taskbar-icon",
     "dialog:default",
     "global-shortcut:default",
     "updater:default",

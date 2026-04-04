@@ -1,14 +1,23 @@
 //! On Windows, Tao applies the window icon only as `ICON_SMALL` (title bar). The taskbar button
 //! uses `ICON_BIG`; if it is never set, WebView2 leaves the default blue placeholder.
+//!
+//! In **release** bundles, prefer loading the icon from the same PE resource `tauri-winres` embeds
+//! (`32512`) so we do not depend on in-memory RGBA decoding matching the installer `exe`.
 
 use std::mem;
 
 use tauri::image::Image;
 use tauri::WebviewWindow;
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIcon, SendMessageW, DestroyIcon, HICON, ICON_BIG, WM_SETICON,
+    CreateIcon, DestroyIcon, LoadImageW, SendMessageW, HICON, ICON_BIG, IMAGE_ICON, LR_DEFAULTSIZE,
+    WM_SETICON,
 };
+
+/// Resource ID used by `tauri-build` / `tauri-winres` (`set_icon_with_id(..., "32512")`).
+const TAURI_WINRES_ICON_ID: usize = 32512;
 
 #[repr(C)]
 struct Pixel {
@@ -30,19 +39,47 @@ pub fn apply_taskbar_big_icon<R: tauri::Runtime>(window: &WebviewWindow<R>, icon
     let Ok(hwnd) = window.hwnd() else {
         return;
     };
-    let Some(hicon) = hicon_from_rgba(icon) else {
+    if apply_big_icon_from_exe_module(hwnd) {
         return;
-    };
-    unsafe {
-        let prev = SendMessageW(
-            hwnd,
-            WM_SETICON,
-            Some(WPARAM(ICON_BIG as usize)),
-            Some(LPARAM(hicon.0 as isize)),
-        );
-        if prev.0 != 0 {
-            let _ = DestroyIcon(HICON(prev.0 as _));
+    }
+    if let Some(hicon) = hicon_from_rgba(icon) {
+        unsafe {
+            replace_wm_seticon(hwnd, ICON_BIG, hicon);
         }
+    }
+}
+
+/// Uses the embedded application icon from the running `exe` (matches Start Menu / file icon).
+fn apply_big_icon_from_exe_module(hwnd: HWND) -> bool {
+    unsafe {
+        let Ok(module) = GetModuleHandleW(None) else {
+            return false;
+        };
+        let Ok(img) = LoadImageW(
+            Some(windows::Win32::Foundation::HINSTANCE(module.0)),
+            PCWSTR(TAURI_WINRES_ICON_ID as *mut u16),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_DEFAULTSIZE,
+        ) else {
+            return false;
+        };
+        let hicon = HICON(img.0);
+        replace_wm_seticon(hwnd, ICON_BIG, hicon);
+        true
+    }
+}
+
+unsafe fn replace_wm_seticon(hwnd: HWND, kind: u32, hicon: HICON) {
+    let prev = SendMessageW(
+        hwnd,
+        WM_SETICON,
+        Some(WPARAM(kind as usize)),
+        Some(LPARAM(hicon.0 as isize)),
+    );
+    if prev.0 != 0 {
+        let _ = DestroyIcon(HICON(prev.0 as _));
     }
 }
 

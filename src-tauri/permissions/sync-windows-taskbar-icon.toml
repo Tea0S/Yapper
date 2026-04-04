@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-sync-windows-taskbar-icon"
+description = "Allows re-applying the Windows taskbar/window icons after the webview loads."
+commands.allow = ["sync_windows_taskbar_icon"]
