@@ -1,7 +1,18 @@
 # Yapper
-
+## What is it?
 Windows-first desktop dictation: **Whisper** (via [faster-whisper](https://github.com/SYSTRAN/faster-whisper)) in a local Python sidecar, optional **self-hosted** [Yapper Node](yapper-node/main.py) on your LAN/VPN, plus dictionary/corrections and YAML **tone** presets applied in the Rust app.
 
+## Why?
+Initial release of a new project called **Yapper**. This is local, ai driven dictation powered off Whisper, or Nvidia's Parakeet. While Whisper should run on CPU if you have an Nvidia GPU, your experience will be infinitely better with one!
+
+It supports key bind dictation right into your text box or google doc, audio file transcription of recorded files, custom dictionaries and phrases all in a simple packaged interface. 
+
+**Why?** Well simply, I rely on dictation every single day as someone with awful hands. I usually rely on my iPhone for this because for years, Apple's dictation was simply the best. But that always stopped me from being able to use it on my PC, where the only accurate options cost 100's of dollars and inaccessible. In the age of AI, you would think this would be more accessible with so many open source models, but the software that has cropped up around this space is either a paid subscription or lacks features that the older software has like dictionaries. 
+
+I wanted to change that, at least for myself. And If I'm going to build it, I might as well release it. This is an inital version that I have been using for a few days — if you also need dictation at your PC please give it a whirl and let me know what you think!
+
+Support the development of Yapper.
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/M4M21WSC82)
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) and [Node.js](https://nodejs.org/) (for Tauri 2 + SvelteKit)
