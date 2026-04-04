@@ -22,6 +22,8 @@ jobs:
     timeout-minutes: 120
     env:
       GITHUB_REF_NAME: ${{ github.ref_name }}
+      # Tauri reads this when signing updater artifacts (file alone is not enough on CI).
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,6 +82,7 @@ jobs:
     timeout-minutes: 120
     env:
       GITHUB_REF_NAME: ${{ github.ref_name }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
