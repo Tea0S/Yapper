@@ -7,9 +7,15 @@ use tauri::{
 pub const LABEL: &str = "hud";
 
 /// Collapsed “always there” capsule — height fits hover tooltip inside the webview.
+#[cfg(not(target_os = "macos"))]
 const SIZE_COLLAPSED: (f64, f64) = (112.0, 88.0);
+#[cfg(target_os = "macos")]
+const SIZE_COLLAPSED: (f64, f64) = (112.0, 36.0);
 /// Wider meter while dictating / transcribing (same height so tooltips are not clipped).
+#[cfg(not(target_os = "macos"))]
 const SIZE_EXPANDED: (f64, f64) = (268.0, 88.0);
+#[cfg(target_os = "macos")]
+const SIZE_EXPANDED: (f64, f64) = (268.0, 44.0);
 
 fn hud_url(app: &AppHandle) -> Result<Url, String> {
     let main = app
@@ -37,6 +43,40 @@ fn position_bottom_center(win: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn resize_preserving_center(win: &WebviewWindow, width: f64, height: f64) -> Result<(), String> {
+    let old_size = win.outer_size().map_err(|e| e.to_string())?;
+    let old_pos = win.outer_position().map_err(|e| e.to_string())?;
+
+    let center_x = old_pos.x + old_size.width as i32 / 2;
+    let center_y = old_pos.y + old_size.height as i32 / 2;
+
+    win.set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+
+    let new_size = win.outer_size().map_err(|e| e.to_string())?;
+    let mut x = center_x - new_size.width as i32 / 2;
+    let mut y = center_y - new_size.height as i32 / 2;
+
+    let monitor = win
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .or_else(|| win.primary_monitor().ok().flatten())
+        .ok_or_else(|| "no monitor".to_string())?;
+    let wa = monitor.work_area();
+    let min_x = wa.position.x;
+    let min_y = wa.position.y;
+    let max_x = wa.position.x + wa.size.width as i32 - new_size.width as i32;
+    let max_y = wa.position.y + wa.size.height as i32 - new_size.height as i32;
+
+    x = x.clamp(min_x, max_x.max(min_x));
+    y = y.clamp(min_y, max_y.max(min_y));
+
+    win.set_position(PhysicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn build_hud_window(app: &AppHandle, url: Url) -> Result<WebviewWindow, String> {
     let mut builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
         .title("Yapper")
@@ -51,14 +91,7 @@ fn build_hud_window(app: &AppHandle, url: Url) -> Result<WebviewWindow, String> 
         .focused(false)
         .shadow(false);
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        builder = builder.transparent(true);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        builder = builder.transparent(false);
-    }
+    builder = builder.transparent(true);
 
     builder.build().map_err(|e| e.to_string())
 }
@@ -68,8 +101,12 @@ pub fn ensure_collapsed_visible(app: &AppHandle) -> Result<(), String> {
     let url = hud_url(app)?;
     if let Some(w) = app.get_webview_window(LABEL) {
         w.navigate(url).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        resize_preserving_center(&w, SIZE_COLLAPSED.0, SIZE_COLLAPSED.1)?;
+        #[cfg(not(target_os = "macos"))]
         w.set_size(LogicalSize::new(SIZE_COLLAPSED.0, SIZE_COLLAPSED.1))
             .map_err(|e| e.to_string())?;
+        #[cfg(not(target_os = "macos"))]
         position_bottom_center(&w)?;
         w.show().map_err(|e| e.to_string())?;
         let _ = w.set_always_on_top(true);
@@ -92,8 +129,12 @@ pub fn set_expanded(app: &AppHandle, expanded: bool) -> Result<(), String> {
     } else {
         SIZE_COLLAPSED
     };
+    #[cfg(target_os = "macos")]
+    resize_preserving_center(&w, lw, lh)?;
+    #[cfg(not(target_os = "macos"))]
     w.set_size(LogicalSize::new(lw, lh))
         .map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
     position_bottom_center(&w)?;
     Ok(())
 }

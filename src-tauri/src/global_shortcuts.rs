@@ -68,7 +68,7 @@ pub(crate) fn refresh(app: &AppHandle) -> Result<String, String> {
                     match ptt_stop_inner(&app, &*state).await {
                         Ok(text) => {
                             if !text.is_empty() {
-                                let _ = crate::paste::paste_text_at_focus(&text);
+                                let _ = crate::paste::paste_text_at_focus_on_main_thread(&app, text);
                             }
                         }
                         Err(_) => {}

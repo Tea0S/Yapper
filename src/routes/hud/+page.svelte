@@ -1,33 +1,24 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
 
   type HudPhase = "hidden" | "idle" | "listening" | "transcribing";
   type MicLevel = { rms: number; peak: number };
 
   let phase = $state<HudPhase>("idle");
   let mic = $state<MicLevel>({ rms: 0, peak: 0 });
-  let pttHint = $state("Push-to-talk");
+  let isMacHud = $state(false);
+  let pointerDown = false;
+  let pointerStartX = 0;
+  let pointerStartY = 0;
+  let dragStarted = false;
+
+  const DRAG_THRESHOLD_PX = 6;
 
   const dotCount = 9;
 
   const expanded = $derived(phase === "listening" || phase === "transcribing");
-
-  function formatShortcut(raw: string): string {
-    return raw
-      .split("+")
-      .map((t) => {
-        const u = t.trim().toLowerCase();
-        if (u === "control") return "Ctrl";
-        if (u === "super") return "Win";
-        if (u === "alt") return "Alt";
-        if (u === "shift") return "Shift";
-        if (u.startsWith("digit")) return u.slice(5);
-        if (u.startsWith("key")) return u.slice(3).toUpperCase();
-        return t.trim();
-      })
-      .join(" + ");
-  }
 
   function dotLevel(i: number): number {
     const center = (dotCount - 1) / 2;
@@ -45,15 +36,50 @@
     }
   }
 
+  async function startHudDrag() {
+    if (!isMacHud) return;
+    try {
+      await getCurrentWindow().startDragging();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function handleMacPointerDown(event: PointerEvent) {
+    if (!isMacHud || event.button !== 0) return;
+    pointerDown = true;
+    dragStarted = false;
+    pointerStartX = event.clientX;
+    pointerStartY = event.clientY;
+  }
+
+  async function handleMacPointerMove(event: PointerEvent) {
+    if (!isMacHud || !pointerDown || dragStarted) return;
+    const dx = event.clientX - pointerStartX;
+    const dy = event.clientY - pointerStartY;
+    if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+    dragStarted = true;
+    await startHudDrag();
+  }
+
+  async function handleMacPointerUp() {
+    if (!isMacHud || !pointerDown) return;
+    const shouldOpen = !dragStarted;
+    pointerDown = false;
+    dragStarted = false;
+    if (shouldOpen) {
+      await openYapper();
+    }
+  }
+
+  function handleMacPointerCancel() {
+    pointerDown = false;
+    dragStarted = false;
+  }
+
   onMount(() => {
+    isMacHud = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
     let dead = false;
-    void invoke<{ action: string; shortcut: string }[]>("list_keybinds_cmd")
-      .then((rows) => {
-        if (dead) return;
-        const row = rows.find((r) => r.action === "push_to_talk" && r.shortcut.trim());
-        if (row) pttHint = formatShortcut(row.shortcut);
-      })
-      .catch(() => {});
 
     const tick = async () => {
       if (dead) return;
@@ -80,35 +106,40 @@
   });
 </script>
 
-<div class="hud-root">
-  <div class="stack">
-    <div class="tooltip" role="tooltip">
-      <span class="tip-line"
-        >Hold <strong class="accent">{pttHint}</strong> to dictate · release to transcribe</span
-      >
-      <span class="tip-sub">Click to open Yapper</span>
-    </div>
-    <button
-      type="button"
-      class="pill"
-      class:expanded
-      onclick={openYapper}
-      aria-label="Open Yapper"
+<div class="hud-root" class:macos={isMacHud}>
+  <div class="hud-shell" class:macos={isMacHud}>
+    <div
+      class="stack"
+      class:macos={isMacHud}
+      onpointerdown={isMacHud ? handleMacPointerDown : undefined}
+      onpointermove={isMacHud ? handleMacPointerMove : undefined}
+      onpointerup={isMacHud ? handleMacPointerUp : undefined}
+      onpointercancel={isMacHud ? handleMacPointerCancel : undefined}
+      role={isMacHud ? "presentation" : undefined}
     >
-      {#if expanded}
-        <div class="dots" aria-hidden="true">
-          {#each Array.from({ length: dotCount }, (_, i) => i) as i (i)}
-            <span
-              class="dot"
-              class:busy={phase === "transcribing"}
-              style="--lvl: {phase === 'listening' ? dotLevel(i) : 0.22}"
-            ></span>
-          {/each}
-        </div>
-      {:else}
-        <span class="idle-cap" aria-hidden="true"></span>
-      {/if}
-    </button>
+      <button
+        type="button"
+        class="pill"
+        class:expanded
+        class:macos={isMacHud}
+        onclick={isMacHud ? undefined : openYapper}
+        aria-label="Open Yapper"
+      >
+        {#if expanded}
+          <div class="dots" aria-hidden="true">
+            {#each Array.from({ length: dotCount }, (_, i) => i) as i (i)}
+              <span
+                class="dot"
+                class:busy={phase === "transcribing"}
+                style="--lvl: {phase === 'listening' ? dotLevel(i) : 0.22}"
+              ></span>
+            {/each}
+          </div>
+        {:else}
+          <span class="idle-cap" aria-hidden="true"></span>
+        {/if}
+      </button>
+    </div>
   </div>
 </div>
 
@@ -134,6 +165,27 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  .hud-root.macos {
+    min-height: 100%;
+    height: 100%;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+  }
+
+  .hud-shell {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .hud-shell.macos {
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    background: transparent;
+  }
+
   .stack {
     position: relative;
     display: flex;
@@ -142,51 +194,19 @@
     justify-content: center;
   }
 
-  .stack:hover .tooltip {
-    opacity: 1;
+  .hud-root.macos .stack {
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+    align-items: stretch;
   }
 
-  .tooltip {
-    position: absolute;
-    bottom: calc(100% + 10px);
-    left: 50%;
-    transform: translateX(-50%);
-    max-width: min(280px, 85vw);
-    padding: 9px 14px;
-    border-radius: 10px;
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.4;
-    text-align: center;
-    color: rgba(248, 250, 252, 0.95);
-    background: rgba(12, 14, 18, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(12px);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.16s ease;
-    z-index: 2;
-  }
-
-  .tip-line {
-    display: block;
-  }
-
-  .tip-sub {
-    display: block;
-    margin-top: 4px;
-    font-size: 11px;
-    font-weight: 400;
-    color: rgba(248, 250, 252, 0.65);
-  }
-
-  .accent {
-    color: #e8b4d4;
-    font-weight: 600;
+  .hud-root.macos .stack:active {
+    cursor: grabbing;
   }
 
   .pill {
+    box-sizing: border-box;
     margin: 0;
     padding: 0;
     border: none;
@@ -209,6 +229,20 @@
     padding: 5px 14px;
   }
 
+  .pill.macos {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 28px;
+    padding: 0 16px;
+    border-radius: 999px;
+    background: rgba(18, 22, 27, 0.84);
+    border-color: rgba(255, 255, 255, 0.34);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+      0 1px 8px rgba(0, 0, 0, 0.28);
+  }
+
   .pill:hover {
     border-color: rgba(255, 255, 255, 0.52);
     background: rgba(10, 12, 16, 0.55);
@@ -218,6 +252,14 @@
     min-width: 236px;
     min-height: 36px;
     padding: 10px 20px;
+  }
+
+  .pill.expanded.macos {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 36px;
+    padding: 0 20px;
   }
 
   .idle-cap {

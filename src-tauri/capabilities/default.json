@@ -4,9 +4,11 @@
   "description": "Default capability for Yapper",
   "windows": ["main", "hud"],
   "permissions": [
+    "allow-app-commands",
     "core:default",
     "core:app:allow-set-app-theme",
     "core:app:allow-default-window-icon",
+    "core:window:allow-start-dragging",
     "core:window:allow-set-icon",
     "allow-sync-windows-taskbar-icon",
     "dialog:default",
