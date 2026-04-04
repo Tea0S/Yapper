@@ -2,6 +2,8 @@
 ## What is it?
 Windows-first desktop dictation: **Whisper** (via [faster-whisper](https://github.com/SYSTRAN/faster-whisper)) in a local Python sidecar, optional **self-hosted** [Yapper Node](yapper-node/main.py) on your LAN/VPN, plus dictionary/corrections and YAML **tone** presets applied in the Rust app.
 
+[![Image](https://cdn.discordapp.com/attachments/742092148526153822/1489848243796971570/yapper_hRLig2QTeT.png?ex=69d1e8cd&is=69d0974d&hm=0a8bce6bac1a9661db4b2bf11748e16656a01845d640d64144ceff0c62af5918&animated=true)](https://cdn.discordapp.com/attachments/742092148526153822/1489848243796971570/yapper_hRLig2QTeT.png?ex=69d1e8cd&is=69d0974d&hm=0a8bce6bac1a9661db4b2bf11748e16656a01845d640d64144ceff0c62af5918&animated=true)
+
 ## Why?
 Initial release of a new project called **Yapper**. This is local, ai driven dictation powered off Whisper, or Nvidia's Parakeet. While Whisper should run on CPU if you have an Nvidia GPU, your experience will be infinitely better with one!
 
@@ -12,7 +14,9 @@ It supports key bind dictation right into your text box or google doc, audio fil
 I wanted to change that, at least for myself. And If I'm going to build it, I might as well release it. This is an inital version that I have been using for a few days — if you also need dictation at your PC please give it a whirl and let me know what you think!
 
 Support the development of Yapper.
+
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/M4M21WSC82)
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) and [Node.js](https://nodejs.org/) (for Tauri 2 + SvelteKit)
