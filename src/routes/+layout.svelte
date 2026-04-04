@@ -122,6 +122,7 @@
     display: grid;
     grid-template-columns: 220px 1fr;
     min-height: 100vh;
+    background: var(--bg);
   }
   .sidebar {
     padding: 1.5rem 1.25rem;
@@ -185,5 +186,6 @@
   .main {
     padding: 2rem 2.25rem;
     overflow: auto;
+    background: var(--bg);
   }
 </style>
