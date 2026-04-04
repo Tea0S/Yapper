@@ -1,0 +1,3 @@
+# Bundled Apple Silicon macOS runtime: sidecar (incl. mlx-whisper / Metal) + Yapper Node.
+-r ../sidecar/requirements-macos.txt
+-r ../yapper-node/requirements.txt

@@ -29,7 +29,11 @@ Support the development of Yapper.
 - For **local dev without a bundled runtime:** Python 3.10+ on `PATH` / `py` launcher, with:
 
 ```bash
+# Windows / Linux, or macOS if you only need the CPU (CTranslate2) path:
 pip install -r sidecar/requirements.txt
+
+# macOS Apple Silicon — includes mlx-whisper for the default Metal Whisper path:
+pip install -r sidecar/requirements-macos.txt
 ```
 
 Release installers that include **no separate Python install** use `src-tauri/resources/python-runtime/` (gitignored): on Windows run `npm run pack:release`; on macOS (Apple Silicon) run `npm run bundle:python:mac` then `npm run tauri build` (see **macOS app (packaged)** below).
@@ -103,7 +107,7 @@ npm run bundle:python:mac
 npm run tauri build
 ```
 
-`bundle:python:mac` downloads an **aarch64** [python-build-standalone](https://github.com/astral-sh/python-build-standalone) build, runs `pip install` using `scripts/python-runtime-requirements.txt` (sidecar + Yapper Node), and leaves the tree ready for Tauri’s `resources/**/*` bundle step. Release artifacts land under `src-tauri/target/release/bundle/` (for example `macos/*.app` and a `.dmg` when enabled).
+`bundle:python:mac` downloads an **aarch64** [python-build-standalone](https://github.com/astral-sh/python-build-standalone) build, runs `pip install` using `scripts/python-runtime-requirements-macos.txt` (sidecar + **mlx-whisper** + Yapper Node), and leaves the tree ready for Tauri’s `resources/**/*` bundle step. Release artifacts land under `src-tauri/target/release/bundle/` (for example `macos/*.app` and a `.dmg` when enabled).
 
 For day-to-day dev you can still use a project venv and `YAPPER_PYTHON` instead of running this script every time.
 

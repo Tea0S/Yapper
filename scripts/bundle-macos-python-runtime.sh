@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REQ="$ROOT/scripts/python-runtime-requirements.txt"
+REQ="$ROOT/scripts/python-runtime-requirements-macos.txt"
 DEST="$ROOT/src-tauri/resources/python-runtime"
 
 # Pin to Astral python-build-standalone release + CPython version (keep in sync with Windows script when practical).
