@@ -63,7 +63,7 @@ fn position_bottom_center(win: &WebviewWindow) -> Result<(), String> {
 }
 
 fn build_hud_window(app: &AppHandle, url: Url) -> Result<WebviewWindow, String> {
-    let mut builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
+    WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
         .title("Yapper")
         .inner_size(SIZE_COLLAPSED.0, SIZE_COLLAPSED.1)
         .resizable(false)
@@ -74,18 +74,8 @@ fn build_hud_window(app: &AppHandle, url: Url) -> Result<WebviewWindow, String> 
         .skip_taskbar(true)
         .visible(false)
         .focused(false)
-        .shadow(false);
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        builder = builder.transparent(true);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        builder = builder.transparent(false);
-    }
-
-    builder
+        .shadow(false)
+        .transparent(true)
         .on_navigation(|url| crate::allow_navigation_in_webview(url))
         .on_new_window(|url, _| crate::handle_new_window_request(url))
         .build()

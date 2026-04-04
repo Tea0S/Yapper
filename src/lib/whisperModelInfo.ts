@@ -7,6 +7,16 @@ export const WHISPER_MODEL_DISK_MB: Record<string, number> = {
   "large-v3": 3000,
 };
 
+/** Hugging Face MLX checkpoints — sizes mirror CT2 builds (approximate). */
+export const WHISPER_MLX_MODEL_DISK_MB: Record<string, number> = {
+  "mlx-community/whisper-tiny-mlx": 75,
+  "mlx-community/whisper-base-mlx": 145,
+  "mlx-community/whisper-small-mlx": 470,
+  "mlx-community/whisper-medium-mlx": 1500,
+  "mlx-community/whisper-large-v3-mlx": 3000,
+  "mlx-community/whisper-large-v3-turbo": 1600,
+};
+
 /**
  * Rough peak model memory vs int8, for UI hints only.
  * float16/float32 need wider tensors at runtime even when weights on disk are quantized.
@@ -18,11 +28,23 @@ export const COMPUTE_RUNTIME_MULT: Record<string, number> = {
 };
 
 export function whisperDiskMb(modelId: string): number {
-  return WHISPER_MODEL_DISK_MB[modelId] ?? WHISPER_MODEL_DISK_MB.base;
+  return (
+    WHISPER_MODEL_DISK_MB[modelId] ??
+    WHISPER_MLX_MODEL_DISK_MB[modelId] ??
+    WHISPER_MODEL_DISK_MB.base
+  );
+}
+
+/** True when the stored `whisper_model` setting is an MLX Hub repo (Apple Silicon path). */
+export function isMlxWhisperModelId(modelId: string): boolean {
+  return modelId.includes("mlx-community/") || modelId.endsWith("-mlx");
 }
 
 export function whisperRuntimeMbHint(modelId: string, computeType: string): number {
   const disk = whisperDiskMb(modelId);
+  if (isMlxWhisperModelId(modelId)) {
+    return Math.round(disk * 1.15);
+  }
   const mult = COMPUTE_RUNTIME_MULT[computeType] ?? 1;
   return Math.round(disk * mult);
 }
@@ -46,4 +68,17 @@ export const WHISPER_MODEL_OPTIONS: {
   { id: "small", line: "Small — better accuracy" },
   { id: "medium", line: "Medium — high accuracy" },
   { id: "large-v3", line: "Large v3 — best quality" },
+];
+
+/** Apple Silicon — MLX Whisper on Metal (Hugging Face repos). */
+export const WHISPER_MODEL_OPTIONS_MLX: {
+  id: string;
+  line: string;
+}[] = [
+  { id: "mlx-community/whisper-tiny-mlx", line: "Tiny — fastest, least accurate (MLX)" },
+  { id: "mlx-community/whisper-base-mlx", line: "Base — good default (MLX)" },
+  { id: "mlx-community/whisper-small-mlx", line: "Small — better accuracy (MLX)" },
+  { id: "mlx-community/whisper-medium-mlx", line: "Medium — high accuracy (MLX)" },
+  { id: "mlx-community/whisper-large-v3-turbo", line: "Large v3 Turbo — fast high quality (MLX)" },
+  { id: "mlx-community/whisper-large-v3-mlx", line: "Large v3 — best quality (MLX)" },
 ];

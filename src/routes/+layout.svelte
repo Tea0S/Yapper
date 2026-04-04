@@ -127,7 +127,11 @@
   .shell {
     display: grid;
     grid-template-columns: 220px 1fr;
-    min-height: 100vh;
+    grid-template-rows: 1fr;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
     background: var(--bg);
   }
   .sidebar {
@@ -137,6 +141,8 @@
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
+    min-height: 0;
+    overflow-y: auto;
   }
   .brand {
     display: flex;
@@ -190,8 +196,10 @@
     line-height: 1.35;
   }
   .main {
+    min-height: 0;
     padding: 2rem 2.25rem;
     overflow: auto;
+    overscroll-behavior-y: contain;
     background: var(--bg);
   }
 </style>

@@ -32,7 +32,7 @@ Support the development of Yapper.
 pip install -r sidecar/requirements.txt
 ```
 
-Release installers that include **no separate Python install** are built with `npm run pack:release` (bundles an embeddable CPython + deps under `src-tauri/resources/python-runtime/`; folder is gitignored).
+Release installers that include **no separate Python install** use `src-tauri/resources/python-runtime/` (gitignored): on Windows run `npm run pack:release`; on macOS (Apple Silicon) run `npm run bundle:python:mac` then `npm run tauri build` (see **macOS app (packaged)** below).
 
 ### `program not found` / `cargo metadata` failed
 
@@ -91,6 +91,21 @@ Protocol: [docs/protocol.md](docs/protocol.md).
 ## Linux (later)
 
 Tauri and `cpal` build on Linux; global shortcuts and paste-to-focused-window need X11/Wayland-specific follow-up. Start with `npm run tauri build` on a Linux host after installing distro Tauri prerequisites.
+
+## macOS app (packaged)
+
+**Apple Silicon (arm64) only** for the bundled-Python flow below; Intel Macs are out of scope.
+
+To ship a `.app` / `.dmg` **without** relying on Homebrew or a separate Python install, bundle a standalone CPython into `src-tauri/resources/python-runtime/` (same resource slot as on Windows), then build:
+
+```bash
+npm run bundle:python:mac
+npm run tauri build
+```
+
+`bundle:python:mac` downloads an **aarch64** [python-build-standalone](https://github.com/astral-sh/python-build-standalone) build, runs `pip install` using `scripts/python-runtime-requirements.txt` (sidecar + Yapper Node), and leaves the tree ready for Tauri’s `resources/**/*` bundle step. Release artifacts land under `src-tauri/target/release/bundle/` (for example `macos/*.app` and a `.dmg` when enabled).
+
+For day-to-day dev you can still use a project venv and `YAPPER_PYTHON` instead of running this script every time.
 
 ## Windows installer (packaged app)
 

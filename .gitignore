@@ -26,5 +26,5 @@ dist/
 # OS / editor (optional; remove if you want these shared)
 Thumbs.db
 
-# Windows embeddable runtime (run scripts/bundle-windows-python-runtime.ps1 before release build)
+# Bundled Python runtime (Windows: scripts/bundle-windows-python-runtime.ps1; macOS: npm run bundle:python:mac)
 src-tauri/resources/python-runtime/

@@ -840,13 +840,14 @@ async fn wait_ptt_chunk_transcript(
             return Err("Engine not started".into());
         };
 
-        if iter % 40 == 0 {
+        // Whisper/MLX decode often takes several seconds. The IPC queue stays empty until the sidecar
+        // prints one JSON line — that is normal, not a stuck queue.
+        if iter.is_multiple_of(100) && iter > 0 {
             if let Some(side) = local_sidecar.as_ref() {
+                let elapsed = iter as f32 * 0.05;
                 ptt_log(format!(
-                    "wait_chunk: seq={seq} ~{:.1}s elapsed pending_len={} | {}",
-                    iter as f32 * 0.05,
-                    side.pending_len().await,
-                    side.pending_debug_line().await
+                    "wait_chunk: seq={seq} ~{elapsed:.0}s — sidecar still decoding (queue empty until `final` arrives) pending_len={}",
+                    side.pending_len().await
                 ));
             }
         }
@@ -1225,12 +1226,15 @@ struct HudSnapshot {
 struct HudChromeInfo {
     /// From `cfg!` — do not infer from `navigator.userAgent` (breaks Windows WebView).
     macos: bool,
+    /// Apple Silicon only — MLX Whisper is not available on Intel Macs or other platforms.
+    apple_silicon: bool,
 }
 
 #[tauri::command]
 fn hud_chrome_info() -> HudChromeInfo {
     HudChromeInfo {
         macos: cfg!(target_os = "macos"),
+        apple_silicon: cfg!(all(target_os = "macos", target_arch = "aarch64")),
     }
 }
 

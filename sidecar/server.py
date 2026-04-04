@@ -19,6 +19,8 @@ MODEL: Any = None
 MODEL_NAME = ""
 DEVICE = "cpu"
 MOCK = False
+# When True, `MODEL` is a sentinel object; inference uses mlx_whisper (Apple Silicon).
+USE_MLX = False
 # Last init parameters for EnsureModel / unload / reload
 CONFIG: dict[str, Any] = {}
 
@@ -54,7 +56,16 @@ def emit(obj: dict) -> None:
 
 def unload_whisper() -> None:
     """Release model weights and try to return VRAM to the driver."""
-    global MODEL, MODEL_NAME
+    global MODEL, MODEL_NAME, USE_MLX
+    if USE_MLX:
+        try:
+            from mlx_whisper.transcribe import ModelHolder
+
+            ModelHolder.model = None
+            ModelHolder.model_path = None
+        except ImportError:
+            pass
+        USE_MLX = False
     MODEL = None
     MODEL_NAME = ""
     gc.collect()
@@ -211,6 +222,11 @@ def _purge_hf_repo_cache(download_root: str, model_id: str) -> None:
     _purge_ct2_flat(download_root, model_id)
 
 
+def _is_mlx_model_id(model: str) -> bool:
+    m = (model or "").strip()
+    return "mlx-community/" in m or m.endswith("-mlx")
+
+
 def load_whisper(model: str, device: str, compute_type: str, model_dir: Optional[str]) -> None:
     global MODEL, MODEL_NAME
     from faster_whisper import WhisperModel
@@ -290,6 +306,49 @@ def load_whisper(model: str, device: str, compute_type: str, model_dir: Optional
     )
 
 
+def load_mlx_whisper(model: str, model_dir: Optional[str]) -> None:
+    """Apple Silicon: Hugging Face MLX checkpoints via mlx-whisper (Metal)."""
+    global MODEL, MODEL_NAME, USE_MLX
+    try:
+        import mlx_whisper  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(
+            "mlx-whisper is not installed. On Apple Silicon Macs, run: "
+            "pip install -r sidecar/requirements-macos.txt"
+        ) from e
+    if model_dir:
+        try:
+            hub = str(Path(model_dir) / "hub")
+            Path(hub).mkdir(parents=True, exist_ok=True)
+            os.environ.setdefault("HF_HUB_CACHE", hub)
+            os.environ.setdefault("HUGGINGFACE_HUB_CACHE", hub)
+        except OSError:
+            pass
+    import mlx.core as mx
+    from mlx_whisper.transcribe import ModelHolder
+
+    dtype = mx.float16
+    sys.stderr.write(
+        f"yapper-sidecar: MLX loading weights (HF download if needed) repo={model!r} …\n"
+    )
+    sys.stderr.flush()
+    ModelHolder.get_model(model, dtype=dtype)
+    USE_MLX = True
+    MODEL = object()
+    MODEL_NAME = model
+    sys.stderr.write(f"yapper-sidecar: MLX Whisper loaded repo={model!r}\n")
+    sys.stderr.flush()
+
+
+def load_whisper_for_config(
+    model: str, device: str, compute_type: str, model_dir: Optional[str]
+) -> None:
+    if _is_mlx_model_id(model):
+        load_mlx_whisper(model, model_dir)
+    else:
+        load_whisper(model, device, compute_type, model_dir)
+
+
 def store_config(
     model: str,
     dev: str,
@@ -314,7 +373,7 @@ def load_from_config() -> None:
         return
     if CONFIG.get("engine") != "whisper":
         raise RuntimeError("Only whisper supports reload in this sidecar")
-    load_whisper(
+    load_whisper_for_config(
         CONFIG["model"],
         CONFIG["device"],
         CONFIG["compute_type"],
@@ -375,6 +434,54 @@ def _segment_is_likely_hallucination(text: str) -> bool:
     if len(t) < 6:
         return False
     return any(s in t for s in _HALLUCINATION_SUBSTRINGS)
+
+
+def _segment_probs(seg: Any) -> tuple[str, float, Any]:
+    """Text, no_speech_prob, avg_logprob from a faster-whisper Segment or an mlx-whisper segment dict."""
+    if isinstance(seg, dict):
+        t = (seg.get("text") or "").strip()
+        nsp = float(seg.get("no_speech_prob", 0.0) or 0.0)
+        alp = seg.get("avg_logprob")
+        return t, nsp, alp
+    t = (getattr(seg, "text", None) or "").strip()
+    nsp = float(getattr(seg, "no_speech_prob", 0.0) or 0.0)
+    alp = getattr(seg, "avg_logprob", None)
+    return t, nsp, alp
+
+
+def _filtered_text_from_segments(
+    segments: Any,
+    *,
+    log_tag: str,
+    fallback_text: Optional[str] = None,
+) -> str:
+    """Same post-filter as live faster-whisper PCM: drop no-speech / bad logprob / common hallucinations."""
+    parts: list[str] = []
+    n_seg = 0
+    n_kept = 0
+    for seg in segments or []:
+        n_seg += 1
+        t, nsp, alp = _segment_probs(seg)
+        if not t:
+            continue
+        if nsp >= 0.72:
+            vlog(f"{log_tag}: skip seg no_speech_prob={nsp:.2f} {t[:50]!r}")
+            continue
+        if alp is not None and float(alp) < -1.05:
+            vlog(f"{log_tag}: skip seg avg_logprob={alp:.2f} {t[:50]!r}")
+            continue
+        if _segment_is_likely_hallucination(t):
+            vlog(f"{log_tag}: skip seg hallucination pattern {t[:60]!r}")
+            continue
+        parts.append(t)
+        n_kept += 1
+    out = " ".join(parts).strip()
+    vlog(f"{log_tag}: segments total={n_seg} kept={n_kept} text_chars={len(out)}")
+    if out:
+        return out
+    if isinstance(fallback_text, str) and fallback_text.strip():
+        return fallback_text.strip()
+    return ""
 
 
 def _w_float(w: dict[str, Any], key: str, default: float) -> float:
@@ -439,6 +546,58 @@ def build_transcribe_kwargs(*, for_file: bool) -> dict[str, Any]:
     return kw
 
 
+def _call_mlx_transcribe(audio: Any, *, for_file: bool) -> dict[str, Any]:
+    import mlx_whisper
+
+    kw = build_transcribe_kwargs(for_file=for_file)
+    wcfg = CONFIG.get("whisper") or {}
+    hst = _w_float(wcfg, "hallucination_silence_threshold", 1.6)
+    if kw.get("vad_filter") and not for_file:
+        vlog(
+            "mlx pcm: vad_filter_pcm is on but mlx-whisper has no Silero VAD; "
+            "using Rust energy VAD + edge trim only (same as faster-whisper note in code)."
+        )
+    # Match faster-whisper: temperature 0 → greedy only. MLX default multi-temp retries change behavior.
+    temperature = float(kw.get("temperature", 0.0))
+    temp_arg: Any = (temperature,) if temperature > 0 else (0.0,)
+    initial_prompt = kw.get("initial_prompt")
+    if not isinstance(initial_prompt, str) or not initial_prompt.strip():
+        ip = None
+    else:
+        ip = initial_prompt.strip()
+    # mlx-whisper DecodingOptions: beam search is not implemented — never pass beam_size /
+    # patience / best_of (faster-whisper defaults would set beam_size and break).
+    decode_extras: dict[str, Any] = {}
+    lang = kw.get("language")
+    if isinstance(lang, str) and lang.strip():
+        decode_extras["language"] = lang.strip()
+    # Live dictation: text-only decoding (faster-whisper default for mic is also non-timestamp focused).
+    if not for_file:
+        decode_extras["without_timestamps"] = True
+    return mlx_whisper.transcribe(
+        audio,
+        path_or_hf_repo=CONFIG["model"],
+        verbose=None,
+        temperature=temp_arg,
+        compression_ratio_threshold=float(kw["compression_ratio_threshold"]),
+        logprob_threshold=float(kw["log_prob_threshold"]),
+        no_speech_threshold=float(kw["no_speech_threshold"]),
+        condition_on_previous_text=bool(kw.get("condition_on_previous_text", False)),
+        initial_prompt=ip,
+        word_timestamps=False,
+        hallucination_silence_threshold=hst,
+        **decode_extras,
+    )
+
+
+def _mlx_result_to_text(result: dict[str, Any], *, log_tag: str) -> str:
+    return _filtered_text_from_segments(
+        result.get("segments"),
+        log_tag=log_tag,
+        fallback_text=result.get("text"),
+    )
+
+
 def transcribe_pcm_i16(pcm: bytes, sample_rate: int) -> tuple[str, float]:
     import numpy as np
 
@@ -447,6 +606,26 @@ def transcribe_pcm_i16(pcm: bytes, sample_rate: int) -> tuple[str, float]:
 
     if MODEL is None:
         return "", 0.0
+
+    if USE_MLX:
+        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        before = len(audio)
+        audio = _trim_float_audio_edges(audio, sample_rate)
+        trimmed_ms = int(1000 * (before - len(audio)) / max(sample_rate, 1))
+        duration_s = len(audio) / max(sample_rate, 1)
+        vlog(
+            f"transcribe_pcm_mlx: pcm_bytes={len(pcm)} sr={sample_rate} duration_s={duration_s:.3f} "
+            f"trimmed_ms≈{trimmed_ms}"
+        )
+        t0 = time.perf_counter()
+        result = _call_mlx_transcribe(audio, for_file=False)
+        dt = time.perf_counter() - t0
+        text = _mlx_result_to_text(result, log_tag="transcribe_mlx")
+        rtf = (dt / duration_s) if duration_s > 1e-6 else 0.0
+        vlog(
+            f"transcribe_pcm_mlx: done in {dt:.2f}s text_chars={len(text)} rtf≈{rtf:.3f}"
+        )
+        return text, float(rtf)
 
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     before = len(audio)
@@ -473,32 +652,11 @@ def transcribe_pcm_i16(pcm: bytes, sample_rate: int) -> tuple[str, float]:
     except TypeError:
         segments, info = MODEL.transcribe(audio, **transcribe_kw)
     dt = time.perf_counter() - t0
-    parts: list[str] = []
-    n_seg = 0
-    n_kept = 0
-    for s in segments:
-        n_seg += 1
-        t = (s.text or "").strip()
-        if not t:
-            continue
-        nsp = float(getattr(s, "no_speech_prob", 0.0) or 0.0)
-        alp = getattr(s, "avg_logprob", None)
-        if nsp >= 0.72:
-            vlog(f"transcribe_pcm: skip seg no_speech_prob={nsp:.2f} {t[:50]!r}")
-            continue
-        if alp is not None and float(alp) < -1.05:
-            vlog(f"transcribe_pcm: skip seg avg_logprob={alp:.2f} {t[:50]!r}")
-            continue
-        if _segment_is_likely_hallucination(t):
-            vlog(f"transcribe_pcm: skip seg hallucination pattern {t[:60]!r}")
-            continue
-        parts.append(t)
-        n_kept += 1
-    text = " ".join(parts).strip()
+    text = _filtered_text_from_segments(segments, log_tag="transcribe_pcm", fallback_text=None)
     rtf = getattr(info, "duration", 0) and (getattr(info, "duration", 1) * 0.01)
     vlog(
-        f"transcribe_pcm: done in {dt:.2f}s whisper_segments={n_seg} kept={n_kept} "
-        f"text_chars={len(text)} info.duration={getattr(info, 'duration', None)!r}"
+        f"transcribe_pcm: done in {dt:.2f}s text_chars={len(text)} "
+        f"info.duration={getattr(info, 'duration', None)!r}"
     )
     return text, float(rtf or 0.0)
 
@@ -580,18 +738,18 @@ def handle_init(msg: dict) -> None:
         return
 
     try:
-        load_whisper(model, dev, compute, model_dir)
+        load_whisper_for_config(model, dev, compute, model_dir)
     except Exception as e:
         vlog(f"handle_init load_whisper failed: {e!r}")
         emit({"type": "error", "message": f"Whisper load failed: {e}"})
         return
-    DEVICE = dev
+    DEVICE = "mlx" if USE_MLX else dev
     emit({"type": "model_state", "loaded": True})
     emit(
         {
             "type": "ready",
             "engines": list_engines(),
-            "inference_device": dev,
+            "inference_device": DEVICE,
             "compute_type": compute,
         }
     )
@@ -616,7 +774,7 @@ def handle_ensure_model() -> None:
     except Exception as e:
         emit({"type": "error", "message": f"Whisper load failed: {e}"})
         return
-    DEVICE = CONFIG["device"]
+    DEVICE = "mlx" if USE_MLX else CONFIG["device"]
     MODEL_NAME = CONFIG["model"]
     emit({"type": "model_state", "loaded": True})
 
@@ -686,18 +844,25 @@ def handle_file(msg: dict) -> None:
 
     emit({"type": "file_progress", "path": path, "percent": 10.0})
     try:
-        t_kw = build_transcribe_kwargs(for_file=True)
-        hst = _w_float(CONFIG.get("whisper") or {}, "hallucination_silence_threshold", 1.6)
-        try:
-            segments, _ = MODEL.transcribe(
-                str(p),
-                **t_kw,
-                hallucination_silence_threshold=hst,
+        if USE_MLX:
+            result = _call_mlx_transcribe(str(p), for_file=True)
+            text = _mlx_result_to_text(result, log_tag="transcribe_file_mlx")
+        else:
+            t_kw = build_transcribe_kwargs(for_file=True)
+            hst = _w_float(CONFIG.get("whisper") or {}, "hallucination_silence_threshold", 1.6)
+            try:
+                segments, _ = MODEL.transcribe(
+                    str(p),
+                    **t_kw,
+                    hallucination_silence_threshold=hst,
+                )
+            except TypeError:
+                segments, _ = MODEL.transcribe(str(p), **t_kw)
+            text = _filtered_text_from_segments(
+                segments,
+                log_tag="transcribe_file",
+                fallback_text=None,
             )
-        except TypeError:
-            segments, _ = MODEL.transcribe(str(p), **t_kw)
-        parts = [s.text.strip() for s in segments]
-        text = " ".join(parts).strip()
         emit({"type": "file_progress", "path": path, "percent": 100.0})
         emit({"type": "file_done", "path": path, "text": text})
     except Exception as e:

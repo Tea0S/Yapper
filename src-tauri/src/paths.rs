@@ -23,32 +23,77 @@ pub fn model_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// Embeddable interpreter from `src-tauri/resources/python-runtime/` (bundled as `$RESOURCE/resources/...`).
 ///
-/// Prefer **`pythonw.exe`** when present (same folder as `python.exe`). It avoids a console window and
+/// **Windows:** Prefer **`pythonw.exe`** when present (same folder as `python.exe`). It avoids a console window and
 /// avoids Windows quirks where `CREATE_NO_WINDOW` + `python.exe` (console subsystem) can break piped
 /// stdin/stdout (dictation then fails with "pipe is being closed" / os error 232).
+///
+/// **macOS (Apple Silicon) / Linux:** [python-build-standalone](https://github.com/astral-sh/python-build-standalone) layout
+/// (`python-runtime/bin/python3.12`, etc.). On Mac, run `npm run bundle:python:mac` before release builds (arm64 bundle script only).
 pub fn bundled_python_exe(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let candidates = [
-        // Matches `bundle.resources` entry `resources/**/*`
-        app
-            .path()
-            .resolve("resources/python-runtime/python.exe", BaseDirectory::Resource)
-            .ok(),
-        // Legacy / mistaken join (keep if an older layout existed)
-        app
-            .path()
-            .resource_dir()
-            .ok()
-            .map(|r| r.join("python-runtime").join("python.exe")),
-    ];
-    for p in candidates.into_iter().flatten() {
-        if p.is_file() {
-            if let Some(dir) = p.parent() {
-                let w = dir.join("pythonw.exe");
-                if w.is_file() {
-                    return Some(w);
+    #[cfg(windows)]
+    {
+        let candidates = [
+            app
+                .path()
+                .resolve("resources/python-runtime/python.exe", BaseDirectory::Resource)
+                .ok(),
+            app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|r| r.join("python-runtime").join("python.exe")),
+        ];
+        for p in candidates.into_iter().flatten() {
+            if p.is_file() {
+                if let Some(dir) = p.parent() {
+                    let w = dir.join("pythonw.exe");
+                    if w.is_file() {
+                        return Some(w);
+                    }
                 }
+                return Some(p);
             }
-            return Some(p);
+        }
+        None
+    }
+    #[cfg(unix)]
+    {
+        bundled_python_unix(app)
+    }
+}
+
+#[cfg(unix)]
+fn bundled_python_unix(app: &tauri::AppHandle) -> Option<PathBuf> {
+    fn pick_in_bin(bin: PathBuf) -> Option<PathBuf> {
+        if !bin.is_dir() {
+            return None;
+        }
+        for name in [
+            "python3.12",
+            "python3.13",
+            "python3.11",
+            "python3.10",
+            "python3",
+        ] {
+            let p = bin.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    if let Ok(root) = app
+        .path()
+        .resolve("resources/python-runtime", BaseDirectory::Resource)
+    {
+        if let Some(py) = pick_in_bin(root.join("bin")) {
+            return Some(py);
+        }
+    }
+    if let Ok(rd) = app.path().resource_dir() {
+        if let Some(py) = pick_in_bin(rd.join("python-runtime").join("bin")) {
+            return Some(py);
         }
     }
     None

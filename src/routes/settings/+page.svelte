@@ -20,9 +20,11 @@
   } from "$lib/parakeetModelInfo";
   import {
     formatStorageMb,
+    isMlxWhisperModelId,
     whisperDiskMb,
     whisperRuntimeMbHint,
     WHISPER_MODEL_OPTIONS,
+    WHISPER_MODEL_OPTIONS_MLX,
   } from "$lib/whisperModelInfo";
   import { formatShortcutDisplay } from "$lib/formatShortcutDisplay";
 
@@ -92,6 +94,14 @@
   let kStop = $state("");
   /** From Rust `cfg!(target_os = "macos")` — drives ⌘⌃⌥⇧ vs Ctrl/Win labels. */
   let shortcutUiMac = $state(false);
+  /** macOS app build — hide NVIDIA-only UI (Parakeet helpers, CUDA). */
+  let appIsMac = $state(false);
+  /** Apple Silicon only — MLX Whisper model list and Metal-backed inference. */
+  let appleSilicon = $state(false);
+
+  const whisperModelChoices = $derived(
+    appleSilicon ? WHISPER_MODEL_OPTIONS_MLX : WHISPER_MODEL_OPTIONS,
+  );
   type KeybindCaptureTarget = "push_to_talk" | "toggle_open_mic" | "stop_dictation";
   let captureTarget = $state<KeybindCaptureTarget | null>(null);
   let conflict = $state<string[]>([]);
@@ -162,10 +172,16 @@
     uiTheme = await loadUiTheme();
     applyUiTheme(uiTheme);
     try {
-      const chrome = await invoke<{ macos: boolean }>("hud_chrome_info");
+      const chrome = await invoke<{ macos: boolean; appleSilicon?: boolean }>(
+        "hud_chrome_info",
+      );
       shortcutUiMac = chrome.macos;
+      appIsMac = chrome.macos;
+      appleSilicon = Boolean(chrome.appleSilicon);
     } catch {
       shortcutUiMac = false;
+      appIsMac = false;
+      appleSilicon = false;
     }
     inferenceHost =
       (await invoke<string | null>("get_setting_cmd", { key: "inference_host" })) ??
@@ -177,9 +193,32 @@
       (await invoke<string | null>("get_setting_cmd", { key: "remote_token" })) ?? "";
     engine =
       (await invoke<string | null>("get_setting_cmd", { key: "engine" })) ?? "whisper";
+    if (appIsMac && engine === "parakeet") {
+      engine = "whisper";
+    }
     whisperModel =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_model" })) ??
       "base";
+    if (appleSilicon) {
+      if (whisperModel === "mlx-community/whisper-large-v3-turbo-mlx") {
+        whisperModel = "mlx-community/whisper-large-v3-turbo";
+      }
+      const legacyToMlx: Record<string, string> = {
+        tiny: "mlx-community/whisper-tiny-mlx",
+        base: "mlx-community/whisper-base-mlx",
+        small: "mlx-community/whisper-small-mlx",
+        medium: "mlx-community/whisper-medium-mlx",
+        "large-v3": "mlx-community/whisper-large-v3-mlx",
+      };
+      if (legacyToMlx[whisperModel]) {
+        whisperModel = legacyToMlx[whisperModel]!;
+      }
+      if (!WHISPER_MODEL_OPTIONS_MLX.some((o) => o.id === whisperModel)) {
+        whisperModel = "mlx-community/whisper-base-mlx";
+      }
+    } else if (isMlxWhisperModelId(whisperModel)) {
+      whisperModel = "base";
+    }
     {
       const pk =
         (await invoke<string | null>("get_setting_cmd", { key: "parakeet_model" })) ??
@@ -201,6 +240,9 @@
     cuda = await invoke("cuda_available");
     whisperDevice =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_device" })) ?? "auto";
+    if (appIsMac && whisperDevice === "cuda") {
+      whisperDevice = "auto";
+    }
     inputDeviceId =
       (await invoke<string | null>("get_setting_cmd", { key: "input_device_name" })) ?? "";
     vadEnergyThreshold =
@@ -837,25 +879,32 @@
       <label for="eng">Recognition engine</label>
       <select id="eng" bind:value={engine}>
         <option value="whisper">Whisper (recommended)</option>
-        <option value="parakeet" disabled={!cuda}>Parakeet (NVIDIA GPU only)</option>
+        {#if !appIsMac}
+          <option value="parakeet" disabled={!cuda}>Parakeet (NVIDIA GPU only)</option>
+        {/if}
       </select>
     </div>
-    {#if !cuda}
+    {#if !cuda && !appIsMac}
       <p class="note">Parakeet needs an NVIDIA GPU. Whisper works on CPU or NVIDIA.</p>
     {/if}
     <div class="field">
       {#if engine === "whisper"}
         <label for="wm">Model size</label>
         <select id="wm" bind:value={whisperModel}>
-          {#each WHISPER_MODEL_OPTIONS as m}
+          {#each whisperModelChoices as m}
             <option value={m.id}>
               {m.line} — {formatStorageMb(whisperDiskMb(m.id))} on disk
             </option>
           {/each}
         </select>
         <p class="field-hint">
-          One-time download into the app cache. Size is the same for int8, float16, and float32 — only speed and memory
-          while running change.
+          {#if appleSilicon}
+            MLX checkpoints for Apple Silicon (Metal). One-time download into the app cache; first run may fetch from
+            Hugging Face.
+          {:else}
+            One-time download into the app cache. Size is the same for int8, float16, and float32 — only speed and memory
+            while running change.
+          {/if}
         </p>
       {:else}
         <label for="wm-pk">Model</label>
@@ -873,7 +922,16 @@
       {/if}
     </div>
     {#if engine === "whisper"}
-      <p class="note">First use downloads the model; Wi‑Fi helps for larger sizes.</p>
+      <p class="note">
+        {#if appleSilicon && lazyLoadWhisper}
+          Load-on-demand: weights download and load on your first dictation. Turn off &ldquo;Load the model only when
+          needed&rdquo; to download at engine start instead.
+        {:else if appleSilicon}
+          Weights load when the engine starts (Hugging Face download first if needed). Wi‑Fi helps for larger models.
+        {:else}
+          First use downloads the model; Wi‑Fi helps for larger sizes.
+        {/if}
+      </p>
     {:else}
       <p class="note">First use downloads the checkpoint; Wi‑Fi helps for the larger options.</p>
     {/if}
@@ -893,7 +951,7 @@
       </select>
     </div>
     <p class="note">After idle timeout, the model unloads from RAM. The next session loads from disk again (no new download).</p>
-    {#if engine === "whisper"}
+    {#if engine === "whisper" && !appleSilicon}
       <div class="field">
         <label for="ct">Number format (speed vs. precision)</label>
         <select id="ct" bind:value={computeType}>
@@ -907,68 +965,90 @@
           )} — ballpark only; real use depends on GPU drivers and batching.
         </p>
       </div>
+    {:else if engine === "whisper" && appleSilicon}
+      <p class="field-hint">
+        Rough memory while loaded (ballpark): {formatStorageMb(
+          whisperRuntimeMbHint(whisperModel, computeType),
+        )} — MLX runs Whisper in <strong>fp16 on Metal</strong>. This is not int8: the
+        <code>compute_type</code> value in your settings (<code>{computeType}</code>) is only for faster-whisper /
+        CTranslate2 and is ignored for MLX.
+      </p>
     {/if}
     <div class="field">
       <label for="wd">Processor</label>
       <select id="wd" bind:value={whisperDevice}>
         <option value="auto">Automatic</option>
         <option value="cpu">CPU only</option>
-        <option value="cuda">NVIDIA GPU (CUDA)</option>
+        {#if !appIsMac}
+          <option value="cuda">NVIDIA GPU (CUDA)</option>
+        {/if}
       </select>
     </div>
-    <p class="note">
-      GPU issues? Install the libraries in <a href="#gpu-deps">NVIDIA helpers</a> below, then use Save &amp; restart.
-    </p>
+    {#if !appIsMac}
+      <p class="note">
+        GPU issues? Install the libraries in <a href="#gpu-deps">NVIDIA helpers</a> below, then use Save &amp; restart.
+      </p>
+    {:else if appleSilicon}
+      <p class="note">
+        Apple Silicon builds use <strong>MLX Whisper</strong>. Install Python deps with
+        <code>pip install -r sidecar/requirements-macos.txt</code> when developing outside a bundled
+        runtime.
+      </p>
+    {/if}
 
     {#if engine === "whisper"}
       <h3 class="settings-subh">Fine-tuning (Whisper)</h3>
-      <p class="note">Applied when the engine starts — use <em>Save &amp; restart engine</em>. Higher values often mean slower runs.</p>
+      <p class="note">
+        Applied when the engine starts — use <em>Save &amp; restart engine</em>. Higher values often mean slower runs.
+      </p>
       <div class="whisper-grid">
-        <div class="field">
-          <label for="wbeam">Beam size</label>
-          <div class="slider-row">
-            <input
-              id="wbeam"
-              type="range"
-              min="1"
-              max="10"
-              step="1"
-              value={Math.round(n(whisperBeamSize, 5))}
-              oninput={(e) => (whisperBeamSize = e.currentTarget.value)}
-            />
-            <input class="slider-value" bind:value={whisperBeamSize} inputmode="numeric" autocomplete="off" />
+        {#if !appleSilicon}
+          <div class="field">
+            <label for="wbeam">Beam size</label>
+            <div class="slider-row">
+              <input
+                id="wbeam"
+                type="range"
+                min="1"
+                max="10"
+                step="1"
+                value={Math.round(n(whisperBeamSize, 5))}
+                oninput={(e) => (whisperBeamSize = e.currentTarget.value)}
+              />
+              <input class="slider-value" bind:value={whisperBeamSize} inputmode="numeric" autocomplete="off" />
+            </div>
           </div>
-        </div>
-        <div class="field">
-          <label for="wbest">Best of</label>
-          <div class="slider-row">
-            <input
-              id="wbest"
-              type="range"
-              min="1"
-              max="5"
-              step="1"
-              value={Math.round(n(whisperBestOf, 1))}
-              oninput={(e) => (whisperBestOf = e.currentTarget.value)}
-            />
-            <input class="slider-value" bind:value={whisperBestOf} inputmode="numeric" autocomplete="off" />
+          <div class="field">
+            <label for="wbest">Best of</label>
+            <div class="slider-row">
+              <input
+                id="wbest"
+                type="range"
+                min="1"
+                max="5"
+                step="1"
+                value={Math.round(n(whisperBestOf, 1))}
+                oninput={(e) => (whisperBestOf = e.currentTarget.value)}
+              />
+              <input class="slider-value" bind:value={whisperBestOf} inputmode="numeric" autocomplete="off" />
+            </div>
           </div>
-        </div>
-        <div class="field">
-          <label for="wpat">Patience</label>
-          <div class="slider-row">
-            <input
-              id="wpat"
-              type="range"
-              min="0"
-              max="2"
-              step="0.1"
-              value={n(whisperPatience, 1)}
-              oninput={(e) => (whisperPatience = e.currentTarget.value)}
-            />
-            <input class="slider-value" bind:value={whisperPatience} inputmode="decimal" autocomplete="off" />
+          <div class="field">
+            <label for="wpat">Patience</label>
+            <div class="slider-row">
+              <input
+                id="wpat"
+                type="range"
+                min="0"
+                max="2"
+                step="0.1"
+                value={n(whisperPatience, 1)}
+                oninput={(e) => (whisperPatience = e.currentTarget.value)}
+              />
+              <input class="slider-value" bind:value={whisperPatience} inputmode="decimal" autocomplete="off" />
+            </div>
           </div>
-        </div>
+        {/if}
         <div class="field">
           <label for="wtemp">Temperature</label>
           <div class="slider-row">
@@ -1109,7 +1189,15 @@
           <li>Demo mode: {cacheDiagnosticData.settings.mockTranscription ? "on" : "off"}</li>
           <li>Load-on-demand: {cacheDiagnosticData.settings.lazyLoadWhisper ? "on" : "off"}</li>
           <li>Processor setting: {cacheDiagnosticData.settings.whisperDevice}</li>
-          <li>Number format: {cacheDiagnosticData.settings.computeType}</li>
+          <li>
+            Number format:
+            {#if appleSilicon}
+              MLX fp16 on Metal (saved <code>compute_type</code> is
+              <code>{cacheDiagnosticData.settings.computeType}</code> — unused for MLX)
+            {:else}
+              {cacheDiagnosticData.settings.computeType}
+            {/if}
+          </li>
         </ul>
         <details class="diag-raw">
           <summary>Technical details</summary>
@@ -1122,27 +1210,29 @@
     </button>
   </div>
 
-  <div class="panel block" id="gpu-deps">
-    <h2>NVIDIA GPU helpers</h2>
-    <p class="muted short">
-      Needed for GPU-accelerated Whisper on Windows (large one-time download, ~800&nbsp;MB). Model files are separate.
-      Linux uses your Python environment instead.
-    </p>
-    {#if !cuda}
-      <p class="warn">No NVIDIA GPU was detected. Install the latest GPU driver from NVIDIA first.</p>
-    {/if}
-    <button
-      type="button"
-      class="btn btn-primary"
-      disabled={nvidiaInstallBusy}
-      onclick={installNvidiaWhisperLibs}
-    >
-      {nvidiaInstallBusy ? "Installing…" : "Install GPU libraries for Whisper"}
-    </button>
-    {#if nvidiaInstallLog}
-      <pre class="install-log">{nvidiaInstallLog}</pre>
-    {/if}
-  </div>
+  {#if !appIsMac}
+    <div class="panel block" id="gpu-deps">
+      <h2>NVIDIA GPU helpers</h2>
+      <p class="muted short">
+        Needed for GPU-accelerated Whisper on Windows (large one-time download, ~800&nbsp;MB). Model files are separate.
+        Linux uses your Python environment instead.
+      </p>
+      {#if !cuda}
+        <p class="warn">No NVIDIA GPU was detected. Install the latest GPU driver from NVIDIA first.</p>
+      {/if}
+      <button
+        type="button"
+        class="btn btn-primary"
+        disabled={nvidiaInstallBusy}
+        onclick={installNvidiaWhisperLibs}
+      >
+        {nvidiaInstallBusy ? "Installing…" : "Install GPU libraries for Whisper"}
+      </button>
+      {#if nvidiaInstallLog}
+        <pre class="install-log">{nvidiaInstallLog}</pre>
+      {/if}
+    </div>
+  {/if}
 
   <div class="panel block">
     <h2>Microphone</h2>

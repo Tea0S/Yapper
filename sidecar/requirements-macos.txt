@@ -1,0 +1,3 @@
+pip# Apple Silicon (arm64) macOS only — faster-whisper + CTranslate2 do not target Metal.
+-r requirements.txt
+mlx-whisper>=0.4.3

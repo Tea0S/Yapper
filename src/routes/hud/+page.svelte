@@ -136,9 +136,9 @@
   });
 </script>
 
-<div class="hud-root" class:macos={isMacChrome}>
-  <div class="hud-shell" class:macos={isMacChrome}>
-    <div class="stack" class:macos={isMacChrome}>
+<div class="hud-root">
+  <div class="hud-shell">
+    <div class="stack">
       <div class="tooltip" role="tooltip">
         <span class="tip-line"
           >Hold <strong class="accent">{pttHint}</strong> to dictate · release to transcribe</span
@@ -203,14 +203,6 @@
     overflow: visible;
   }
 
-  /* macOS: opaque HUD window — fill and center the chrome. */
-  .hud-root.macos {
-    min-height: 100%;
-    height: 100%;
-    justify-content: center;
-    padding: 0;
-  }
-
   .hud-root * {
     box-sizing: border-box;
   }
@@ -223,12 +215,6 @@
     max-width: 100%;
   }
 
-  .hud-shell.macos {
-    width: 100%;
-    height: 100%;
-    padding: 0;
-  }
-
   .stack {
     position: relative;
     display: flex;
@@ -238,11 +224,6 @@
     width: 100%;
     max-width: 100%;
     overflow: visible;
-  }
-
-  .stack.macos {
-    height: 100%;
-    align-items: stretch;
   }
 
   .stack:hover .tooltip {
@@ -334,8 +315,8 @@
     cursor: grabbing;
   }
 
-  /* Windows / Linux: width tracks Rust logical window (collapsed + expanded). */
-  .pill.expanded:not(.macos) {
+  /* Width tracks Rust logical window (collapsed + expanded). */
+  .pill.expanded {
     align-self: stretch;
     width: 100%;
     max-width: 100%;
@@ -344,23 +325,20 @@
     padding: 8px 10px;
   }
 
+  /* macOS: same footprint as other platforms; local glass via backdrop-filter (no full-window vibrancy). */
   .pill.macos {
-    width: 100%;
-    height: 100%;
-    min-width: 0;
-    min-height: 28px;
-    padding: 0 16px;
-    border-radius: 999px;
-    background: rgba(18, 22, 27, 0.84);
-    border-color: rgba(255, 255, 255, 0.34);
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.45);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
     box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.05),
-      0 1px 8px rgba(0, 0, 0, 0.28);
+      inset 0 1px 0 rgba(255, 255, 255, 0.25),
+      0 4px 20px rgba(0, 0, 0, 0.2);
   }
 
-  .pill.expanded.macos {
-    min-height: 32px;
-    padding: 0 14px;
+  .pill.macos:hover {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.52);
   }
 
   .idle-cap {

@@ -225,13 +225,23 @@ impl SidecarSession {
             }
             if cfg!(unix) {
                 if let Some(fragment) = e.ld_library_path_prepend_unix {
-                    let old = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
-                    let merged = if old.is_empty() {
-                        fragment
+                    if cfg!(target_os = "macos") {
+                        let old = std::env::var("DYLD_LIBRARY_PATH").unwrap_or_default();
+                        let merged = if old.is_empty() {
+                            fragment
+                        } else {
+                            format!("{fragment}:{old}")
+                        };
+                        cmd.env("DYLD_LIBRARY_PATH", merged);
                     } else {
-                        format!("{fragment}:{old}")
-                    };
-                    cmd.env("LD_LIBRARY_PATH", merged);
+                        let old = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+                        let merged = if old.is_empty() {
+                            fragment
+                        } else {
+                            format!("{fragment}:{old}")
+                        };
+                        cmd.env("LD_LIBRARY_PATH", merged);
+                    }
                 }
             }
         }
