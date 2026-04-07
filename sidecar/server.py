@@ -799,7 +799,15 @@ def handle_chunk(msg: dict) -> None:
 
     if MOCK:
         emit({"type": "partial", "text": "[mock] ", "seq": seq})
-        emit({"type": "final", "text": "[mock transcription]", "seq": seq, "rtf": 0.01})
+        if msg.get("is_final", True):
+            emit(
+                {
+                    "type": "final",
+                    "text": "[mock transcription]",
+                    "seq": seq,
+                    "rtf": 0.01,
+                }
+            )
         return
 
     if MODEL is None:

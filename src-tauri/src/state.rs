@@ -4,12 +4,12 @@ use crate::sidecar::SidecarSession;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
-use tauri::async_runtime::JoinHandle;
 use tokio::process::Child;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle as TokioJoinHandle;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,10 +46,21 @@ pub struct AppState {
     /// Push-to-talk overlay (`hud` window) — polled by the HUD webview.
     pub hud_phase: std::sync::Mutex<HudPhase>,
     /// Latest `ptt_start` task started by the global shortcut handler (release awaits it).
-    pub ptt_hotkey_start_pending: Arc<StdMutex<Option<JoinHandle<Result<(), String>>>>>,
+    pub ptt_hotkey_start_pending:
+        Arc<StdMutex<Option<tauri::async_runtime::JoinHandle<Result<(), String>>>>>,
     /// Optional Yapper Node WebSocket server (`yapper-node/main.py`).
     pub yapper_node: Arc<Mutex<Option<Child>>>,
     pub yapper_node_logs: Arc<Mutex<VecDeque<String>>>,
+    /// True after experimental live dictation pasted at least once into the focused field this session.
+    pub live_dictation_did_paste: Arc<AtomicBool>,
+    /// How many Ctrl+Z / ⌘Z steps undo the last live paste (multi-step when using Shift+Enter line breaks).
+    pub live_last_paste_undo_ops: Arc<AtomicU32>,
+    /// Raw text from the last successful live partial (Whisper output before dictionary/tone).
+    pub live_last_partial_text: Arc<Mutex<String>>,
+    /// Serialize sidecar/remote stdin `Chunk` (and related wait) so live and final never interleave.
+    pub inference_io_lock: Arc<Mutex<()>>,
+    /// Background live dictation loop; aborted when dictation stops.
+    pub live_loop_handle: Arc<Mutex<Option<TokioJoinHandle<()>>>>,
 }
 
 impl AppState {
@@ -71,6 +82,11 @@ impl AppState {
             ptt_hotkey_start_pending: Arc::new(StdMutex::new(None)),
             yapper_node: Arc::new(Mutex::new(None)),
             yapper_node_logs: Arc::new(Mutex::new(VecDeque::new())),
+            live_dictation_did_paste: Arc::new(AtomicBool::new(false)),
+            live_last_paste_undo_ops: Arc::new(AtomicU32::new(0)),
+            live_last_partial_text: Arc::new(Mutex::new(String::new())),
+            inference_io_lock: Arc::new(Mutex::new(())),
+            live_loop_handle: Arc::new(Mutex::new(None)),
         }
     }
 }

@@ -89,6 +89,10 @@
   let whisperVadFilterPcm = $state(false);
   let whisperVadFilterFile = $state(true);
 
+  let liveDictationExperimental = $state(false);
+  let liveChunkIntervalMs = $state("2000");
+  let liveMinAudioMs = $state("800");
+
   let kPtt = $state("");
   let kMic = $state("");
   let kStop = $state("");
@@ -302,6 +306,16 @@
     whisperVadFilterFile =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_vad_filter_file" })) !==
       "false";
+
+    liveDictationExperimental =
+      (await invoke<string | null>("get_setting_cmd", {
+        key: "live_dictation_experimental",
+      })) === "true";
+    liveChunkIntervalMs =
+      (await invoke<string | null>("get_setting_cmd", { key: "live_chunk_interval_ms" })) ??
+      "2000";
+    liveMinAudioMs =
+      (await invoke<string | null>("get_setting_cmd", { key: "live_min_audio_ms" })) ?? "800";
 
     const binds = await invoke<{ action: string; shortcut: string }[]>(
       "list_keybinds_cmd",
@@ -586,6 +600,18 @@
     await invoke("set_setting_cmd", {
       key: "whisper_vad_filter_file",
       value: whisperVadFilterFile ? "true" : "false",
+    });
+    await invoke("set_setting_cmd", {
+      key: "live_dictation_experimental",
+      value: liveDictationExperimental ? "true" : "false",
+    });
+    await invoke("set_setting_cmd", {
+      key: "live_chunk_interval_ms",
+      value: String(Math.round(n(liveChunkIntervalMs, 2000))),
+    });
+    await invoke("set_setting_cmd", {
+      key: "live_min_audio_ms",
+      value: String(Math.round(n(liveMinAudioMs, 800))),
     });
     await invoke("set_setting_cmd", {
       key: "hud_widget_enabled",
@@ -916,8 +942,19 @@
           {/each}
         </select>
         <p class="field-hint">
-          English checkpoints from Hugging Face; first load downloads weights (sizes are approximate). NeMo + CUDA
-          required on the inference host.
+          English checkpoints from Hugging Face; first load downloads weights (sizes are approximate). CUDA on the
+          inference host is required.
+        </p>
+        <p class="note">
+          <strong>NeMo is not bundled with Yapper.</strong> Install the
+          <a
+            href="https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/starthere/intro.html#installation"
+            target="_blank"
+            rel="noopener noreferrer"
+            >NVIDIA NeMo Framework</a
+          >
+          separately in the Python environment that runs the sidecar (or your Yapper Node). &ldquo;Install GPU libraries
+          for Whisper&rdquo; does not install NeMo.
         </p>
       {/if}
     </div>
@@ -1157,6 +1194,53 @@
         <input type="checkbox" bind:checked={whisperVadFilterFile} />
         Voice detection on file uploads (recommended)
       </label>
+
+      <h3 class="settings-subh">Experimental live dictation</h3>
+      <p class="note">
+        While you hold push-to-talk (or the mic is open), Yapper pastes rolling text into the <strong>focused</strong>
+        field using the same clipboard + paste as normal dictation. Each update undoes the previous live paste, then
+        pastes the new chunk. When you release, the last live paste is undone and the <strong>same</strong> text is
+        pasted again after dictionary / tone / corrections — there is no second full Whisper pass on the whole clip.
+        Requires a working undo stack in the target app (many editors OK; some web apps are flaky). Whisper only — not
+        Parakeet. Extra CPU/GPU use while speaking.
+      </p>
+      <label class="check">
+        <input
+          type="checkbox"
+          bind:checked={liveDictationExperimental}
+          disabled={engine !== "whisper"}
+        />
+        Type live into focused field (experimental)
+      </label>
+      {#if engine !== "whisper"}
+        <p class="field-hint">Switch recognition engine to Whisper to use live dictation.</p>
+      {/if}
+      <div class="field">
+        <label for="liveIv">Preview interval (ms)</label>
+        <input
+          id="liveIv"
+          type="number"
+          min="500"
+          max="30000"
+          step="100"
+          bind:value={liveChunkIntervalMs}
+          disabled={!liveDictationExperimental || engine !== "whisper"}
+        />
+        <p class="field-hint">How often to send an audio snapshot (500–30000). Default 2000.</p>
+      </div>
+      <div class="field">
+        <label for="liveMin">Minimum audio (ms)</label>
+        <input
+          id="liveMin"
+          type="number"
+          min="200"
+          max="10000"
+          step="50"
+          bind:value={liveMinAudioMs}
+          disabled={!liveDictationExperimental || engine !== "whisper"}
+        />
+        <p class="field-hint">Skip a tick if the buffer is shorter than this (200–10000). Default 800.</p>
+      </div>
     {/if}
 
     <label class="check">

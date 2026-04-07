@@ -94,6 +94,9 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         ("node_server_port", "8765"),
         ("node_server_token", ""),
         ("hud_widget_enabled", "true"),
+        ("live_dictation_experimental", "false"),
+        ("live_chunk_interval_ms", "2000"),
+        ("live_min_audio_ms", "800"),
     ] {
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",

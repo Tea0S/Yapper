@@ -18,7 +18,11 @@ fn spoken_punct_rules() -> &'static [(Regex, &'static str)] {
             ("begin quote", "\""),
             ("end quote", "\""),
             ("new paragraph", "\n\n"),
-            ("new line", "\n"),
+            ("new line", "\n\n"),
+            // Whisper often prints this as one word or hyphenated.
+            ("line break", "\n\n"),
+            ("new-line", "\n\n"),
+            ("newline", "\n\n"),
             ("full stop", "."),
             ("semicolon", ";"),
             ("ellipsis", "…"),
@@ -74,23 +78,82 @@ fn spoken_punct_rules() -> &'static [(Regex, &'static str)] {
     RULES.as_slice()
 }
 
+/// Private-use characters interpreted by `paste.rs` as key clicks (not pasted as text).
+/// Keep codepoints in sync with `paste::KEY_SENTINEL_*`.
+pub(crate) const KEY_SENTINEL_ENTER: &str = "\u{E090}";
+pub(crate) const KEY_SENTINEL_CAPS_LOCK: &str = "\u{E091}";
+pub(crate) const KEY_SENTINEL_TAB: &str = "\u{E092}";
+pub(crate) const KEY_SENTINEL_ESCAPE: &str = "\u{E093}";
+pub(crate) const KEY_SENTINEL_BACKSPACE: &str = "\u{E094}";
+
+/// Spoken key commands → sentinels (`\s+` so ASR spacing variants still match).
+fn spoken_key_rules() -> &'static [(Regex, &'static str)] {
+    static RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+        let mut pairs: Vec<(&'static str, &'static str)> = vec![
+            (r"(?i)\bpress\s+caps\s+lock\b", KEY_SENTINEL_CAPS_LOCK),
+            (r"(?i)\bhit\s+caps\s+lock\b", KEY_SENTINEL_CAPS_LOCK),
+            (r"(?i)\bpress\s+capslock\b", KEY_SENTINEL_CAPS_LOCK),
+            (r"(?i)\bhit\s+capslock\b", KEY_SENTINEL_CAPS_LOCK),
+            (r"(?i)\bpress\s+backspace\b", KEY_SENTINEL_BACKSPACE),
+            (r"(?i)\bhit\s+backspace\b", KEY_SENTINEL_BACKSPACE),
+            (r"(?i)\bpress\s+escape\b", KEY_SENTINEL_ESCAPE),
+            (r"(?i)\bhit\s+escape\b", KEY_SENTINEL_ESCAPE),
+            (r"(?i)\bpress\s+esc\b", KEY_SENTINEL_ESCAPE),
+            (r"(?i)\bhit\s+esc\b", KEY_SENTINEL_ESCAPE),
+            (r"(?i)\bpress\s+return\b", KEY_SENTINEL_ENTER),
+            (r"(?i)\bhit\s+return\b", KEY_SENTINEL_ENTER),
+            (r"(?i)\bpress\s+enter\b", KEY_SENTINEL_ENTER),
+            (r"(?i)\bhit\s+enter\b", KEY_SENTINEL_ENTER),
+            (r"(?i)\bpress\s+tab\b", KEY_SENTINEL_TAB),
+            (r"(?i)\bhit\s+tab\b", KEY_SENTINEL_TAB),
+        ];
+        pairs.sort_by_key(|(pat, _)| std::cmp::Reverse(pat.len()));
+        pairs
+            .into_iter()
+            .filter_map(|(pat, rep)| Regex::new(pat).ok().map(|re| (re, rep)))
+            .collect()
+    });
+    RULES.as_slice()
+}
+
 pub fn apply_spoken_punctuation(text: &str) -> String {
     let mut s = text.to_string();
     for (re, rep) in spoken_punct_rules() {
         s = re.replace_all(&s, *rep).into_owned();
     }
     s = normalize_after_spoken_punct(&s);
+    for (re, rep) in spoken_key_rules() {
+        s = re.replace_all(&s, *rep).into_owned();
+    }
     repair_asr_punctuation(&s)
+}
+
+/// Collapse `,,`, `, ,`, etc. (Whisper comma + spoken "comma", or ASR stutter).
+fn collapse_comma_runs(s: &str) -> String {
+    let Ok(re) = Regex::new(r",\s*(?:,\s*)+") else {
+        return s.to_string();
+    };
+    let mut out = s.to_string();
+    for _ in 0..16 {
+        let n = re.replace_all(&out, ", ").into_owned();
+        if n == out {
+            break;
+        }
+        out = n;
+    }
+    out
 }
 
 /// Tighten typical ASR spacing around punctuation after phrase replacement.
 fn normalize_after_spoken_punct(s: &str) -> String {
+    let mut out = collapse_comma_runs(s);
     // Sentence end: keep one space after so the next word isn't glued (e.g. "Hello. how").
     let Ok(re_sent) = Regex::new(r"(\S)\s+([.!?])\s*") else {
-        return s.to_string();
+        return out;
     };
-    let mut out = re_sent.replace_all(s, "$1$2 ").into_owned();
-    let Ok(re_comma) = Regex::new(r"(\S)\s+,\s*") else {
+    out = re_sent.replace_all(&out, "$1$2 ").into_owned();
+    // Do not anchor on comma: `, ,` would match `(\S)\s+,\s*` with \S = comma and corrupt the text.
+    let Ok(re_comma) = Regex::new(r"([^\s,])\s+,\s*") else {
         return out;
     };
     out = re_comma.replace_all(&out, "$1, ").into_owned();
@@ -113,12 +176,13 @@ fn normalize_after_spoken_punct(s: &str) -> String {
     let Ok(re_spaces) = Regex::new(r"[ \t\f\v]{2,}") else {
         return out;
     };
-    re_spaces.replace_all(&out, " ").into_owned()
+    out = re_spaces.replace_all(&out, " ").into_owned();
+    collapse_comma_runs(&out)
 }
 
 /// Fix collisions when spoken punctuation and Whisper both insert marks (e.g. `leave,", Kane`, `.. .`).
 pub(crate) fn repair_asr_punctuation(s: &str) -> String {
-    let mut out = s.to_string();
+    let mut out = collapse_comma_runs(s);
     // leave,", Kane said → leave," Kane said (comma belongs inside the closing quote for attribution)
     if let Ok(re) = Regex::new(r#"([A-Za-z']+),\s*"\s*,\s+([A-Z][a-z]*)"#) {
         out = re.replace_all(&out, "${1},\" ${2}").into_owned();
@@ -126,14 +190,6 @@ pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     // Same after ? or ! before dialogue tag
     if let Ok(re) = Regex::new(r#"([?!]),\s*"\s*,\s+([A-Z][a-z]*)"#) {
         out = re.replace_all(&out, "${1},\" ${2}").into_owned();
-    }
-    // Collapse comma runs first (e.g. "Hi",, she) before quote-tightening below.
-    if let Ok(re) = Regex::new(r",\s*,+") {
-        out = re.replace_all(&out, ",").into_owned();
-    }
-    // Double comma right after a closing quote (if any survived): "foo",, bar → "foo", bar
-    if let Ok(re) = Regex::new(r#""\s*,\s*,"#) {
-        out = re.replace_all(&out, "\u{22}, ").into_owned();
     }
     // Stuttered periods / spaced dots (Whisper + spoken "period"): vampire.. . → vampire.
     if let Ok(re) = Regex::new(r"\.(?:\s*\.)+") {
@@ -143,6 +199,14 @@ pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     if let Ok(re) = Regex::new(r"\.\s+\.") {
         out = re.replace_all(&out, ".").into_owned();
     }
+    // Whisper often ends questions with ? while spoken "question mark" adds another; normalize
+    // also pulls `? ?` → `??`. Same pattern for exclamation.
+    if let Ok(re) = Regex::new(r"\?(?:\s*\?)+") {
+        out = re.replace_all(&out, "?").into_owned();
+    }
+    if let Ok(re) = Regex::new(r"\!(?:\s*\!)+") {
+        out = re.replace_all(&out, "!").into_owned();
+    }
     // Period glued to comma (often duplicate sentence boundary): ., → .
     if let Ok(re) = Regex::new(r"\.,\s*") {
         out = re.replace_all(&out, ". ").into_owned();
@@ -151,7 +215,21 @@ pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     if let Ok(re) = Regex::new(r",\s+\.") {
         out = re.replace_all(&out, ".").into_owned();
     }
-    out
+    // Whisper outputs closing dialogue as …," then a duplicate spoken "period" becomes space-dot
+    // before the tag: `…to," . Vivian` → `…to," Vivian`. Same when the quote ends with a period
+    // inside: `"Stop." . She` → `"Stop." She`.
+    if let Ok(re) = Regex::new(r#"(?i)(,|\.)\s*"\s+\.\s+([A-Za-z])"#) {
+        out = re.replace_all(&out, "${1}\" ${2}").into_owned();
+    }
+    // Pause after spoken "close quotes": ASR often puts comma/period *outside* the closing mark.
+    // `Hi" , she` → `Hi," she`. `\D` before `"` skips `6" ,` (inches).
+    if let Ok(re) = Regex::new(r#"(\D)"\s+,\s+"#) {
+        out = re.replace_all(&out, "${1},\" ").into_owned();
+    }
+    if let Ok(re) = Regex::new(r#"(\D)"\s+\.\s+([A-Za-z])"#) {
+        out = re.replace_all(&out, "${1}\" ${2}").into_owned();
+    }
+    collapse_comma_runs(&out)
 }
 
 #[derive(Debug, Deserialize)]
@@ -292,9 +370,31 @@ rules:
 
     #[test]
     fn spoken_punct_new_paragraph() {
-        let o = apply_spoken_punctuation("First line new paragraph Second");
-        assert!(o.contains("\n\n"));
-        assert!(o.contains("Second"));
+        for phrase in [
+            "new paragraph",
+            "new line",
+            "line break",
+            "new-line",
+            "newline",
+        ] {
+            let o = apply_spoken_punctuation(&format!("First line {phrase} Second"));
+            assert!(o.contains("\n\n"), "expected double newline for {phrase}");
+            assert!(o.contains("Second"));
+        }
+    }
+
+    #[test]
+    fn spoken_key_commands() {
+        assert!(apply_spoken_punctuation("ok press enter").contains(KEY_SENTINEL_ENTER));
+        assert!(apply_spoken_punctuation("hit return now").contains(KEY_SENTINEL_ENTER));
+        assert!(apply_spoken_punctuation("hit caps lock").contains(KEY_SENTINEL_CAPS_LOCK));
+        assert!(apply_spoken_punctuation("press capslock").contains(KEY_SENTINEL_CAPS_LOCK));
+        assert!(apply_spoken_punctuation("press tab").contains(KEY_SENTINEL_TAB));
+        assert!(apply_spoken_punctuation("hit esc").contains(KEY_SENTINEL_ESCAPE));
+        assert!(apply_spoken_punctuation("press backspace").contains(KEY_SENTINEL_BACKSPACE));
+        let o = apply_spoken_punctuation("before press enter after");
+        assert!(o.contains("before") && o.contains("after"));
+        assert!(!o.contains("press"));
     }
 
     #[test]
@@ -312,10 +412,85 @@ rules:
     }
 
     #[test]
+    fn repair_stutter_question_exclamation() {
+        assert_eq!(repair_asr_punctuation("really??"), "really?");
+        assert_eq!(repair_asr_punctuation("really? ?"), "really?");
+        assert_eq!(repair_asr_punctuation("no way!!"), "no way!");
+        assert_eq!(repair_asr_punctuation("no way! !"), "no way!");
+    }
+
+    #[test]
+    fn spoken_question_mark_after_whisper_question() {
+        assert_eq!(
+            apply_spoken_punctuation("really? question mark"),
+            "really? "
+        );
+    }
+
+    #[test]
     fn repair_double_comma_after_quote() {
         assert_eq!(
             repair_asr_punctuation(r#""Hi",, she said"#),
             r#""Hi", she said"#
+        );
+    }
+
+    #[test]
+    fn collapse_comma_runs_fiction_style_lists() {
+        let s = "Ciri nodded furiously,, Oh, the things she wanted to do,, the promise";
+        assert_eq!(
+            collapse_comma_runs(s),
+            "Ciri nodded furiously, Oh, the things she wanted to do, the promise"
+        );
+    }
+
+    #[test]
+    fn spoken_comma_after_whisper_comma_does_not_double() {
+        assert_eq!(
+            apply_spoken_punctuation("furiously, comma Oh the things"),
+            "furiously, Oh the things"
+        );
+        assert_eq!(
+            apply_spoken_punctuation("furiously , comma Oh"),
+            "furiously, Oh"
+        );
+    }
+
+    #[test]
+    fn repair_pause_punctuation_after_close_quote() {
+        assert_eq!(
+            repair_asr_punctuation(r#"She said "Hi" , she left"#),
+            r#"She said "Hi," she left"#
+        );
+        assert_eq!(
+            repair_asr_punctuation(r#"She said "Hi" . She left"#),
+            r#"She said "Hi" She left"#
+        );
+        assert_eq!(
+            repair_asr_punctuation(r#"about 6" , wide"#),
+            r#"about 6" , wide"#
+        );
+    }
+
+    #[test]
+    fn apply_spoken_close_quotes_then_comma_phrase() {
+        let o = apply_spoken_punctuation(r#"word close quotes comma she said"#);
+        assert!(
+            o.contains("\"she") || o.contains(", she"),
+            "unexpected output: {o:?}"
+        );
+        assert!(!o.contains("\" ,"), "comma should not float outside quotes: {o:?}");
+    }
+
+    #[test]
+    fn repair_duplicate_period_after_closing_quote() {
+        assert_eq!(
+            repair_asr_punctuation(r#""So that's it," . Vivian said"#),
+            r#""So that's it," Vivian said"#
+        );
+        assert_eq!(
+            repair_asr_punctuation(r#""Stop." . She nodded"#),
+            r#""Stop." She nodded"#
         );
     }
 }

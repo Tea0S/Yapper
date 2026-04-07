@@ -86,6 +86,8 @@ fn resolve_input_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::D
 pub enum PttControlCmd {
     Start(mpsc::Sender<Result<(), String>>, Option<String>),
     Stop(mpsc::Sender<Result<(Vec<f32>, u32), String>>),
+    /// Copy current recording buffer without stopping or clearing (for live preview).
+    SnapshotBuffer(mpsc::Sender<Result<(Vec<f32>, u32), String>>),
 }
 
 /// Handle cloned into `AppState`; all capture runs on a single background thread.
@@ -115,6 +117,11 @@ impl PttController {
                     PttControlCmd::Stop(reply) => {
                         cap.set_recording(false);
                         let samples = cap.take_buffer_f32();
+                        let rate = cap.input_sample_rate;
+                        let _ = reply.send(Ok((samples, rate)));
+                    }
+                    PttControlCmd::SnapshotBuffer(reply) => {
+                        let samples = cap.peek_buffer_f32();
                         let rate = cap.input_sample_rate;
                         let _ = reply.send(Ok((samples, rate)));
                     }
@@ -152,6 +159,19 @@ impl PttController {
             .lock()
             .map_err(|_| "microphone thread lock poisoned".to_string())?
             .send(PttControlCmd::Stop(reply_tx))
+            .map_err(|_| "microphone thread stopped".to_string())?;
+        reply_rx
+            .recv()
+            .map_err(|_| "microphone thread stopped".to_string())?
+    }
+
+    /// Clone of samples recorded so far; does not stop capture or clear the buffer.
+    pub fn snapshot_buffer(&self) -> Result<(Vec<f32>, u32), String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.tx
+            .lock()
+            .map_err(|_| "microphone thread lock poisoned".to_string())?
+            .send(PttControlCmd::SnapshotBuffer(reply_tx))
             .map_err(|_| "microphone thread stopped".to_string())?;
         reply_rx
             .recv()
@@ -241,6 +261,13 @@ impl PttCapture {
 
     pub fn take_buffer_f32(&self) -> Vec<f32> {
         self.buffer.lock().map(|mut b| std::mem::take(&mut *b)).unwrap_or_default()
+    }
+
+    fn peek_buffer_f32(&self) -> Vec<f32> {
+        self.buffer
+            .lock()
+            .map(|b| b.clone())
+            .unwrap_or_default()
     }
 }
 

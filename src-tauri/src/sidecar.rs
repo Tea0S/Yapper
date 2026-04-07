@@ -83,6 +83,41 @@ pub enum SidecarOut {
     ModelState { loaded: bool },
 }
 
+/// Remove the first `Partial` for `seq`, or the first `Error`. Other events stay queued.
+pub(crate) fn pop_sidecar_partial_for_seq(
+    q: &mut VecDeque<SidecarOut>,
+    seq: u64,
+) -> Result<Option<String>, String> {
+    let mut i = 0usize;
+    while i < q.len() {
+        match &q[i] {
+            SidecarOut::Error { message } => {
+                let msg = message.clone();
+                q.remove(i);
+                ipc_log(format!(
+                    "pop_partial: taking error from queue: {}",
+                    msg.chars().take(120).collect::<String>()
+                ));
+                return Err(msg);
+            }
+            SidecarOut::Partial {
+                text,
+                seq: s,
+            } if *s == seq => {
+                let t = text.clone();
+                q.remove(i);
+                ipc_log(format!(
+                    "pop_partial: matched seq={seq}, text_chars={}",
+                    t.len()
+                ));
+                return Ok(Some(t));
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(None)
+}
+
 /// Remove the first `Final` for `seq`, or the first `Error`. Other events stay queued.
 pub(crate) fn pop_sidecar_transcript_for_seq(
     q: &mut VecDeque<SidecarOut>,
@@ -399,6 +434,11 @@ impl SidecarSession {
     pub async fn pop_transcript_for_seq(&self, seq: u64) -> Result<Option<String>, String> {
         let mut q = self.pending.lock().await;
         pop_sidecar_transcript_for_seq(&mut q, seq)
+    }
+
+    pub async fn pop_partial_for_seq(&self, seq: u64) -> Result<Option<String>, String> {
+        let mut q = self.pending.lock().await;
+        pop_sidecar_partial_for_seq(&mut q, seq)
     }
 
     pub async fn pop_file_done_for_path(&self, path: &str) -> Result<Option<String>, String> {

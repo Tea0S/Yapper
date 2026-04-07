@@ -59,6 +59,8 @@ PCM **s16le** mono, **base64**-encoded body.
 }
 ```
 
+- `is_final`: when **`true`** (default dictation stop), the engine responds with a single **`final`** line for that `seq` (after full decode + post-filters in Python). When **`false`** (experimental live dictation), the engine responds with **`partial`** only for that `seq` — no `final` for the same message. Clients must **drain `partial` events** from their queue so they do not accumulate. The desktop app may paste each partial at the OS focus (clipboard + paste) with undo between updates; on stop it can **commit the last partial** through dictionary/tone in the app **without** sending another merged-audio `chunk` with `is_final: true` (unless live produced no text, then it falls back to a full `final` decode).
+
 ### `transcribe_file`
 
 ```json
@@ -87,6 +89,13 @@ Path must exist on the **inference host** (local sidecar) or files you can read 
 { "type": "partial", "text": "...", "seq": 1 }
 { "type": "final", "text": "...", "seq": 1, "rtf": 0.35 }
 ```
+
+- **`partial`**: best-effort text for live preview; not run through the desktop app’s dictionary/tone pipeline.
+- **`final`**: committed decode for that chunk; the desktop app applies dictionary, corrections, and tone after receive.
+
+## Future improvements (not in the wire protocol yet)
+
+Overlapping audio windows, conditioning on prior preview text, emitting multiple partials per chunk as Whisper segments arrive, and stricter backpressure are planned to improve live preview quality and latency. True streaming ASR (separate from chunked Whisper) may use the same `partial` / `final` shapes with different engine backends.
 
 ### `file_progress` / `file_done`
 

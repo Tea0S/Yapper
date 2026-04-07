@@ -29,8 +29,13 @@ fn spawn_ptt_stop_after_pending(app: AppHandle, label: &'static str) {
                     text.len()
                 ));
                 if !text.is_empty() {
-                    // Main thread + correct modifier (⌘ on macOS, Ctrl elsewhere) — see paste.rs.
-                    let _ = crate::paste::paste_text_at_focus_on_main_thread(&app, text);
+                    // Avoid blocking the async runtime on mpsc::recv waiting for the main thread.
+                    let app_p = app.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ops = crate::paste::paste_text_at_focus_on_main_thread(&app_p, text)?;
+                        Ok::<(), String>(())
+                    })
+                    .await;
                 }
             }
             Err(e) => shortcut_log(format!("{label}: stop failed: {e}")),
