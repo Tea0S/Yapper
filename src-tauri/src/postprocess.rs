@@ -183,6 +183,11 @@ fn normalize_after_spoken_punct(s: &str) -> String {
 /// Fix collisions when spoken punctuation and Whisper both insert marks (e.g. `leave,", Kane`, `.. .`).
 pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     let mut out = collapse_comma_runs(s);
+    // Whisper sometimes prepends sentence punctuation before a spoken punctuation token
+    // at utterance start: `. "Oh"` -> `"Oh"`, `. (` -> `(`, `. ,` -> `,`.
+    if let Ok(re) = Regex::new(r#"(?m)^\s*[.?!;:]+\s+("|,|\(|\[|\{|¿|¡|\.|!|\?|;|:)"#) {
+        out = re.replace_all(&out, "${1}").into_owned();
+    }
     // leave,", Kane said → leave," Kane said (comma belongs inside the closing quote for attribution)
     if let Ok(re) = Regex::new(r#"([A-Za-z']+),\s*"\s*,\s+([A-Z][a-z]*)"#) {
         out = re.replace_all(&out, "${1},\" ${2}").into_owned();
@@ -492,5 +497,28 @@ rules:
             repair_asr_punctuation(r#""Stop." . She nodded"#),
             r#""Stop." She nodded"#
         );
+    }
+
+    #[test]
+    fn spoken_open_quotes_drops_leading_period_artifact() {
+        let o = apply_spoken_punctuation(r#"period open quotes Oh gods comma close quotes"#);
+        assert!(
+            !o.trim_start().starts_with(". \""),
+            "unexpected leading period before opening quote: {o:?}"
+        );
+        assert!(
+            o.contains(r#""Oh gods,"#),
+            "expected quoted phrase to remain intact: {o:?}"
+        );
+    }
+
+    #[test]
+    fn spoken_open_paren_drops_leading_period_artifact() {
+        let o = apply_spoken_punctuation("period open parenthesis test close parenthesis");
+        assert!(
+            !o.trim_start().starts_with(". ("),
+            "unexpected leading period before open paren: {o:?}"
+        );
+        assert!(o.trim_start().starts_with('('), "expected utterance to start with (: {o:?}");
     }
 }
