@@ -148,7 +148,9 @@ fn collapse_comma_runs(s: &str) -> String {
 fn normalize_after_spoken_punct(s: &str) -> String {
     let mut out = collapse_comma_runs(s);
     // Sentence end: keep one space after so the next word isn't glued (e.g. "Hello. how").
-    let Ok(re_sent) = Regex::new(r"(\S)\s+([.!?])\s*") else {
+    // Do not use `\S` here: `"` counts as non-whitespace, so `" . word"` would wrongly become
+    // `"." word"` after open-quote / close-quote commands (same for comma before attribution).
+    let Ok(re_sent) = Regex::new(r#"([^\s"])\s+([.!?])\s*"#) else {
         return out;
     };
     out = re_sent.replace_all(&out, "$1$2 ").into_owned();
@@ -165,7 +167,9 @@ fn normalize_after_spoken_punct(s: &str) -> String {
         return out;
     };
     out = re_colon.replace_all(&out, "$1: ").into_owned();
-    let Ok(re_quote_open) = Regex::new(r#""\s+"#) else {
+    // Tighten `" word"` → `"word"`, but do not eat the space before spoken `.` / `!` / `?`
+    // (otherwise `" . Oh"` becomes `". Oh"`).
+    let Ok(re_quote_open) = Regex::new(r#""\s+(?![.!?])"#) else {
         return out;
     };
     out = re_quote_open.replace_all(&out, "\"").into_owned();
@@ -184,8 +188,12 @@ fn normalize_after_spoken_punct(s: &str) -> String {
 pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     let mut out = collapse_comma_runs(s);
     // Whisper sometimes prepends sentence punctuation before a spoken punctuation token
-    // at utterance start: `. "Oh"` -> `"Oh"`, `. (` -> `(`, `. ,` -> `,`.
-    if let Ok(re) = Regex::new(r#"(?m)^\s*[.?!;:]+\s+("|,|\(|\[|\{|¿|¡|\.|!|\?|;|:)"#) {
+    // at utterance start: `. (` -> `(`, `. ,` -> `,`.
+    // Quote is special: `. " Oh"` must become `"Oh …"` not `" Oh …"` (stray space after `"`).
+    if let Ok(re) = Regex::new(r#"(?m)^\s*[.?!;:]+\s+" ?"#) {
+        out = re.replace_all(&out, "\"").into_owned();
+    }
+    if let Ok(re) = Regex::new(r#"(?m)^\s*[.?!;:]+\s+(,|\(|\[|\{|¿|¡|\.|!|\?|;|:)"#) {
         out = re.replace_all(&out, "${1}").into_owned();
     }
     // leave,", Kane said → leave," Kane said (comma belongs inside the closing quote for attribution)
@@ -520,5 +528,14 @@ rules:
             "unexpected leading period before open paren: {o:?}"
         );
         assert!(o.trim_start().starts_with('('), "expected utterance to start with (: {o:?}");
+    }
+
+    #[test]
+    fn spoken_period_inside_quotes_does_not_glue_to_quote_mark() {
+        let o = apply_spoken_punctuation("open quotes period Oh gods close quotes");
+        assert!(
+            !o.contains("\"."),
+            "sentence tighten must not treat \" as word char before period: {o:?}"
+        );
     }
 }
