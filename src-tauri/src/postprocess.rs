@@ -144,6 +144,61 @@ fn collapse_comma_runs(s: &str) -> String {
     out
 }
 
+/// Collapse whitespace after `"` when starting quoted words; keep `" .` / `" !` / `" ?` intact
+/// (spoken punctuation commands — space between `"` and mark).
+fn tighten_ascii_open_quote_spacing(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && matches!(chars[j], '.' | '!' | '?') {
+                out.push('"');
+                if j > i + 1 {
+                    out.push(' ');
+                }
+                i = j;
+                continue;
+            }
+            out.push('"');
+            i = j;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Whisper often emits `.` right after `"` when the user pauses during “open quotes”.
+/// Strip it before alphabetic text; keep intentional `" . word"` (space between quote and `.`).
+fn strip_asr_period_after_open_quote(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' && i + 1 < chars.len() && chars[i + 1] == '.' {
+            let mut j = i + 2;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && chars[j].is_alphabetic() {
+                out.push('"');
+                out.push(' ');
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Tighten typical ASR spacing around punctuation after phrase replacement.
 fn normalize_after_spoken_punct(s: &str) -> String {
     let mut out = collapse_comma_runs(s);
@@ -167,12 +222,8 @@ fn normalize_after_spoken_punct(s: &str) -> String {
         return out;
     };
     out = re_colon.replace_all(&out, "$1: ").into_owned();
-    // Tighten `" word"` → `"word"`, but do not eat the space before spoken `.` / `!` / `?`
-    // (otherwise `" . Oh"` becomes `". Oh"`).
-    let Ok(re_quote_open) = Regex::new(r#""\s+(?![.!?])"#) else {
-        return out;
-    };
-    out = re_quote_open.replace_all(&out, "\"").into_owned();
+    // Tighten `" word"` → `"word"`, but keep `" . word"` (spoken punctuation).
+    out = tighten_ascii_open_quote_spacing(&out);
     let Ok(re_quote_close) = Regex::new(r#"\s+""#) else {
         return out;
     };
@@ -195,6 +246,17 @@ pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     }
     if let Ok(re) = Regex::new(r#"(?m)^\s*[.?!;:]+\s+(,|\(|\[|\{|¿|¡|\.|!|\?|;|:)"#) {
         out = re.replace_all(&out, "${1}").into_owned();
+    }
+    // Whisper treats pause after spoken "open quotes" like sentence end and emits `.` right after
+    // the opening `"` (e.g. `moment, ".` or `said ". Hello`). Drop that false boundary — but keep
+    // intentional `" . word"` where the user spoke "period" (space between `"` and `.`).
+    if let Ok(re) = Regex::new(r#"(,\s*)"\."#) {
+        out = re.replace_all(&out, "${1}\"").into_owned();
+    }
+    out = strip_asr_period_after_open_quote(&out);
+    // Utterance starts like `.\" . It` (junk boundary + second ASR period): `.\" . ` → `\" `
+    if let Ok(re) = Regex::new(r#"(?m)^\."\s+\."#) {
+        out = re.replace_all(&out, "\" ").into_owned();
     }
     // leave,", Kane said → leave," Kane said (comma belongs inside the closing quote for attribution)
     if let Ok(re) = Regex::new(r#"([A-Za-z']+),\s*"\s*,\s+([A-Z][a-z]*)"#) {
@@ -241,6 +303,9 @@ pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     }
     if let Ok(re) = Regex::new(r#"(\D)"\s+\.\s+([A-Za-z])"#) {
         out = re.replace_all(&out, "${1}\" ${2}").into_owned();
+    }
+    if let Ok(re) = Regex::new(r"[ \t\f\v]{2,}") {
+        out = re.replace_all(&out, " ").into_owned();
     }
     collapse_comma_runs(&out)
 }
@@ -538,4 +603,39 @@ rules:
             "sentence tighten must not treat \" as word char before period: {o:?}"
         );
     }
+
+    #[test]
+    fn repair_asr_false_period_after_open_quote_after_comma() {
+        assert_eq!(
+            repair_asr_punctuation(r#"moment, ". next"#),
+            r#"moment, " next"#
+        );
+    }
+
+    #[test]
+    fn repair_asr_false_period_after_open_quote_before_word() {
+        assert_eq!(
+            repair_asr_punctuation(r#"she said ". Hello"#),
+            r#"she said " Hello"#
+        );
+    }
+
+    #[test]
+    fn repair_asr_utterance_start_period_quote_period() {
+        assert_eq!(
+            repair_asr_punctuation(r#"." . It was"#),
+            r#"" It was"#
+        );
+    }
+
+    #[test]
+    fn repair_asr_comma_open_quote_false_period_like_dictation() {
+        let s = r#"It was just really intense there for a moment, ". more"#;
+        let o = repair_asr_punctuation(s);
+        assert!(
+            !o.contains(", \"."),
+            "ASR should not leave comma–quote–period before more text: {o:?}"
+        );
+    }
+
 }
