@@ -1,4 +1,4 @@
-use regex::Regex;
+use regex::{Captures, Regex};
 use serde::Deserialize;
 use std::sync::LazyLock;
 
@@ -254,6 +254,26 @@ pub(crate) fn repair_asr_punctuation(s: &str) -> String {
         out = re.replace_all(&out, "${1}\"").into_owned();
     }
     out = strip_asr_period_after_open_quote(&out);
+    // `smirked.", he` — pause + spoken "comma" after close quotes when the sentence already ended
+    // inside the quotes (`. "`, `? "`, `! "`): drop the stray comma and capitalize the next sentence.
+    if let Ok(re) = Regex::new(r#"([\.\?!])\"\s*,\s+([a-z])([a-z']*)"#) {
+        out = re
+            .replace_all(&out, |caps: &Captures| {
+                let punct = caps.get(1).unwrap().as_str();
+                let upper = caps
+                    .get(2)
+                    .unwrap()
+                    .as_str()
+                    .chars()
+                    .next()
+                    .unwrap()
+                    .to_uppercase()
+                    .collect::<String>();
+                let rest = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+                format!("{punct}\" {upper}{rest}")
+            })
+            .into_owned();
+    }
     // Utterance starts like `.\" . It` (junk boundary + second ASR period): `.\" . ` → `\" `
     if let Ok(re) = Regex::new(r#"(?m)^\."\s+\."#) {
         out = re.replace_all(&out, "\" ").into_owned();
@@ -635,6 +655,14 @@ rules:
         assert!(
             !o.contains(", \"."),
             "ASR should not leave comma–quote–period before more text: {o:?}"
+        );
+    }
+
+    #[test]
+    fn repair_stray_comma_after_sentence_end_inside_quotes() {
+        assert_eq!(
+            repair_asr_punctuation(r#"She smirked.", he bet"#),
+            r#"She smirked." He bet"#
         );
     }
 
