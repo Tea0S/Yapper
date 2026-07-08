@@ -85,7 +85,7 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
 
     for (k, v) in [
         ("whisper_device", "auto"),
-        ("parakeet_model", "nvidia/parakeet-tdt-0.6b-v3"),
+        ("parakeet_model", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"),
         ("input_device_name", ""),
         ("lazy_load_whisper", "false"),
         ("model_idle_unload_mins", "0"),
@@ -95,6 +95,9 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         ("node_server_token", ""),
         ("hud_widget_enabled", "true"),
         ("live_dictation_experimental", "false"),
+        ("live_streaming_engine", "moonshine"),
+        ("live_streaming_model", "small_streaming"),
+        ("live_feed_interval_ms", "200"),
         ("live_chunk_interval_ms", "2000"),
         ("live_min_audio_ms", "800"),
     ] {

@@ -1,6 +1,6 @@
 [package]
 name = "yapper"
-version = "1.1.8"
+version = "1.2.0"
 description = "Yapper — local-first dictation"
 authors = ["Tea"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri = { version = "2", features = ["image-png", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"

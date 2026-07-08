@@ -4,6 +4,7 @@ export const WHISPER_MODEL_DISK_MB: Record<string, number> = {
   base: 145,
   small: 470,
   medium: 1500,
+  "mobiuslabsgmbh/faster-whisper-large-v3-turbo": 1600,
   "large-v3": 3000,
 };
 
@@ -15,6 +16,7 @@ export const WHISPER_MLX_MODEL_DISK_MB: Record<string, number> = {
   "mlx-community/whisper-medium-mlx": 1500,
   "mlx-community/whisper-large-v3-mlx": 3000,
   "mlx-community/whisper-large-v3-turbo": 1600,
+  "mlx-community/whisper-large-v3-turbo-q4": 900,
 };
 
 /**
@@ -67,6 +69,10 @@ export const WHISPER_MODEL_OPTIONS: {
   { id: "base", line: "Base — good default" },
   { id: "small", line: "Small — better accuracy" },
   { id: "medium", line: "Medium — high accuracy" },
+  {
+    id: "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    line: "Large v3 Turbo — fast high quality",
+  },
   { id: "large-v3", line: "Large v3 — best quality" },
 ];
 
@@ -80,5 +86,9 @@ export const WHISPER_MODEL_OPTIONS_MLX: {
   { id: "mlx-community/whisper-small-mlx", line: "Small — better accuracy (MLX)" },
   { id: "mlx-community/whisper-medium-mlx", line: "Medium — high accuracy (MLX)" },
   { id: "mlx-community/whisper-large-v3-turbo", line: "Large v3 Turbo — fast high quality (MLX)" },
+  {
+    id: "mlx-community/whisper-large-v3-turbo-q4",
+    line: "Large v3 Turbo Q4 — faster, less RAM (MLX)",
+  },
   { id: "mlx-community/whisper-large-v3-mlx", line: "Large v3 — best quality (MLX)" },
 ];

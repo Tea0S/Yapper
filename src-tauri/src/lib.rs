@@ -24,8 +24,10 @@ use crate::db::{
 };
 use crate::paths::{db_path, model_cache_dir, sidecar_script_path};
 use crate::sidecar::{
-    pop_sidecar_partial_for_seq, pop_sidecar_transcript_for_seq, python_executable, SidecarIn,
-    SidecarOut, SidecarSession, SidecarSpawnEnv, WhisperDecodeOptions,
+    pop_sidecar_file_done_for_path, pop_sidecar_stream_for_session,
+    pop_sidecar_transcript_for_seq, python_executable, take_file_progress_for_path,
+    take_file_started_for_path, SidecarIn, SidecarOut, SidecarSession, SidecarSpawnEnv,
+    WhisperDecodeOptions,
 };
 use crate::state::{next_seq, AppState, HudPhase};
 use crate::trace_log::ptt_log;
@@ -39,9 +41,6 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-
 fn whisper_decode_options_from_db(conn: &rusqlite::Connection) -> WhisperDecodeOptions {
     let s = |k: &str, def: &str| {
         get_setting(conn, k)
@@ -91,7 +90,7 @@ fn whisper_decode_options_from_db(conn: &rusqlite::Connection) -> WhisperDecodeO
         condition_on_previous_text: truthy("whisper_condition_on_previous_text", false),
         initial_prompt: s("whisper_initial_prompt", ""),
         language: s("whisper_language", ""),
-        vad_filter_pcm: truthy("whisper_vad_filter_pcm", false),
+        vad_filter_pcm: truthy("whisper_vad_filter_pcm", true),
         vad_filter_file: truthy("whisper_vad_filter_file", true),
     }
 }
@@ -100,13 +99,14 @@ fn inference_model_for_init(conn: &rusqlite::Connection) -> rusqlite::Result<Str
     let engine = get_setting(conn, "engine")?.unwrap_or_else(|| "whisper".into());
     if engine == "parakeet" {
         Ok(get_setting(conn, "parakeet_model")?
-            .unwrap_or_else(|| "nvidia/parakeet-tdt-0.6b-v3".into()))
+            .unwrap_or_else(|| "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8".into()))
     } else {
         Ok(get_setting(conn, "whisper_model")?.unwrap_or_else(|| "base".into()))
     }
 }
 use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
-use tauri::{Emitter, Manager, Runtime, State, Url};
+use tauri::{Emitter, Manager, Runtime, RunEvent, State, Url, WindowEvent};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 fn live_preview_wanted(conn: &rusqlite::Connection) -> bool {
     get_setting(conn, "live_dictation_experimental")
@@ -114,16 +114,150 @@ fn live_preview_wanted(conn: &rusqlite::Connection) -> bool {
         .flatten()
         .as_deref()
         == Some("true")
-        && get_setting(conn, "engine")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "whisper".into())
-            == "whisper"
         && get_setting(conn, "mock_transcription")
             .ok()
             .flatten()
             .as_deref()
             != Some("true")
+}
+
+fn live_streaming_engine(conn: &rusqlite::Connection) -> String {
+    get_setting(conn, "live_streaming_engine")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "moonshine".into())
+}
+
+fn live_streaming_model(conn: &rusqlite::Connection) -> String {
+    get_setting(conn, "live_streaming_model")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "small_streaming".into())
+}
+
+async fn send_sidecar_msg(state: &AppState, msg: SidecarIn) -> Result<(), String> {
+    let local_side = state.sidecar.lock().await.clone();
+    if let Some(ref side) = local_side {
+        side.send(&msg).await
+    } else if let Some(rem) = state.remote.lock().await.as_ref() {
+        rem.tx.send(msg).map_err(|e| e.to_string())
+    } else {
+        Err("Engine not started".into())
+    }
+}
+
+async fn wait_stream_started(state: &AppState, session_id: u64) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if Instant::now() > deadline {
+            return Err("Stream start timed out".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let local_side = state.sidecar.lock().await.clone();
+        if let Some(side) = local_side {
+            let mut q = side.pending.lock().await;
+            let mut i = 0usize;
+            while i < q.len() {
+                match &q[i] {
+                    SidecarOut::Error { message } => {
+                        let m = message.clone();
+                        q.remove(i);
+                        return Err(m);
+                    }
+                    SidecarOut::StreamStarted { session_id: sid } if *sid == session_id => {
+                        q.remove(i);
+                        return Ok(());
+                    }
+                    _ => i += 1,
+                }
+            }
+        } else if let Some(rem) = state.remote.lock().await.as_ref() {
+            let mut q = rem.pending.lock().await;
+            let mut i = 0usize;
+            while i < q.len() {
+                match &q[i] {
+                    SidecarOut::Error { message } => {
+                        let m = message.clone();
+                        q.remove(i);
+                        return Err(m);
+                    }
+                    SidecarOut::StreamStarted { session_id: sid } if *sid == session_id => {
+                        q.remove(i);
+                        return Ok(());
+                    }
+                    _ => i += 1,
+                }
+            }
+        } else {
+            return Err("Engine not started".into());
+        }
+    }
+}
+
+async fn wait_stream_final(state: &AppState, session_id: u64) -> Result<String, String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if Instant::now() > deadline {
+            return Err("Stream final timed out".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let local_side = state.sidecar.lock().await.clone();
+        let raw = if let Some(side) = local_side {
+            side.pop_stream_for_session(session_id).await?
+        } else if let Some(rem) = state.remote.lock().await.as_ref() {
+            let mut q = rem.pending.lock().await;
+            pop_sidecar_stream_for_session(&mut q, session_id)?
+        } else {
+            return Err("Engine not started".into());
+        };
+        if let Some((text, is_final)) = raw {
+            if is_final {
+                return Ok(text);
+            }
+        }
+    }
+}
+
+async fn paste_live_partial(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    raw: String,
+) {
+    let t = raw.trim().to_string();
+    if t.is_empty() {
+        return;
+    }
+    {
+        let mut last = state.live_last_paste_at.lock().expect("live_last_paste_at");
+        if last.elapsed() < Duration::from_millis(150) {
+            return;
+        }
+        *last = Instant::now();
+    }
+    let t_paste = match apply_dictation_postprocess(app, state, t.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            ptt_log(format!("live_dictation: postprocess partial: {e}"));
+            t.clone()
+        }
+    };
+    let replace_prior = state.live_dictation_did_paste.load(Ordering::SeqCst);
+    if replace_prior {
+        let n = state.live_last_paste_undo_ops.load(Ordering::SeqCst);
+        if n > 0 {
+            if let Err(e) = paste::undo_n_times_at_focus_spawn(app, n).await {
+                ptt_log(format!("live_dictation: undo before partial: {e}"));
+            }
+        }
+    }
+    match paste::paste_text_at_focus_spawn(app, t_paste).await {
+        Ok(ops) => {
+            state.live_dictation_did_paste.store(true, Ordering::SeqCst);
+            state.live_last_paste_undo_ops.store(ops, Ordering::SeqCst);
+            *state.live_last_partial_text.lock().await = t;
+        }
+        Err(e) => ptt_log(format!("live_dictation: paste partial: {e}")),
+    }
 }
 
 /// If experimental live dictation pasted into the focused field, undo the full paste sequence so the final paste replaces it.
@@ -177,11 +311,44 @@ async fn try_spawn_live_preview(app: &tauri::AppHandle, state: &AppState) {
     }
     let app = app.clone();
     *g = Some(tokio::spawn(async move {
-        live_dictation_preview_loop(app).await;
+        live_streaming_loop(app).await;
     }));
 }
 
-async fn live_dictation_preview_loop(app: tauri::AppHandle) {
+async fn live_streaming_loop(app: tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let conn = match open_db(&app) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if !live_preview_wanted(&conn) {
+        return;
+    }
+    let engine = live_streaming_engine(&conn);
+    let model = live_streaming_model(&conn);
+    let session_id = state.live_stream_session_id.load(Ordering::SeqCst);
+    if session_id == 0 {
+        return;
+    }
+
+    if let Err(e) = send_sidecar_msg(
+        &state,
+        SidecarIn::StartStream {
+            session_id,
+            engine: engine.clone(),
+            model: model.clone(),
+        },
+    )
+    .await
+    {
+        ptt_log(format!("live_dictation: start_stream: {e}"));
+        return;
+    }
+    if let Err(e) = wait_stream_started(&state, session_id).await {
+        ptt_log(format!("live_dictation: wait stream_started: {e}"));
+        return;
+    }
+
     let mut first_tick = true;
     loop {
         let interval_ms: u64 = {
@@ -192,12 +359,18 @@ async fn live_dictation_preview_loop(app: tauri::AppHandle) {
             if !live_preview_wanted(&conn) {
                 break;
             }
-            get_setting(&conn, "live_chunk_interval_ms")
+            get_setting(&conn, "live_feed_interval_ms")
                 .ok()
                 .flatten()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(2000)
-                .clamp(500, 30_000)
+                .or_else(|| {
+                    get_setting(&conn, "live_chunk_interval_ms")
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.parse().ok())
+                })
+                .unwrap_or(200)
+                .clamp(100, 30_000)
         };
 
         if !first_tick {
@@ -205,7 +378,6 @@ async fn live_dictation_preview_loop(app: tauri::AppHandle) {
         }
         first_tick = false;
 
-        let state = app.state::<AppState>();
         if !state.ptt_session_active.load(Ordering::SeqCst) {
             break;
         }
@@ -225,11 +397,6 @@ async fn live_dictation_preview_loop(app: tauri::AppHandle) {
             .unwrap_or(800)
             .clamp(200, 10_000);
 
-        if let Err(e) = ensure_local_model_loaded(&app, &state).await {
-            ptt_log(format!("live_dictation: ensure_model: {e}"));
-            continue;
-        }
-
         let ptt = state.ptt.clone();
         let snapshot = match tokio::task::spawn_blocking(move || ptt.snapshot_buffer()).await {
             Ok(Ok(s)) => s,
@@ -246,8 +413,13 @@ async fn live_dictation_preview_loop(app: tauri::AppHandle) {
         if samples.is_empty() || rate == 0 {
             continue;
         }
-        let ms = (samples.len() as u64 * 1000 / rate as u64) as u32;
-        if ms < min_audio_ms {
+        let cursor = state.live_audio_cursor.load(Ordering::SeqCst) as usize;
+        if cursor >= samples.len() {
+            continue;
+        }
+        let delta = samples[cursor..].to_vec();
+        let ms = (delta.len() as u64 * 1000 / rate as u64) as u32;
+        if ms < min_audio_ms.saturating_div(4).max(50) && cursor == 0 {
             continue;
         }
 
@@ -263,101 +435,87 @@ async fn live_dictation_preview_loop(app: tauri::AppHandle) {
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(12.0)
             .clamp(1.0, 48.0);
-        let samples = condition_speech_signal(&samples, mic_peak, mic_max_gain);
-        let pcm16k = resample_to_whisper_16k_mono(&samples, rate);
+        let delta = condition_speech_signal(&delta, mic_peak, mic_max_gain);
+        state
+            .live_audio_cursor
+            .store(samples.len() as u32, Ordering::SeqCst);
+        let pcm16k = resample_to_whisper_16k_mono(&delta, rate);
         if pcm16k.is_empty() {
             continue;
         }
         let bytes = f32_to_i16_le_bytes(&pcm16k);
         let audio_b64 = B64.encode(&bytes);
-        let seq = next_seq(&state.seq);
 
         let Ok(_io_guard) = state.inference_io_lock.try_lock() else {
             continue;
         };
 
-        let local_side = state.sidecar.lock().await.clone();
-        let msg = SidecarIn::Chunk {
-            seq,
-            sample_rate: 16_000,
-            audio_b64,
-            is_final: false,
-        };
-        let send_res = if let Some(ref side) = local_side {
-            side.send(&msg).await
-        } else if let Some(rem) = state.remote.lock().await.as_ref() {
-            rem.tx.send(msg).map_err(|e| e.to_string())
-        } else {
-            Err("Engine not started".into())
-        };
-        if let Err(e) = send_res {
-            ptt_log(format!("live_dictation: send chunk: {e}"));
+        if let Err(e) = send_sidecar_msg(
+            &state,
+            SidecarIn::FeedAudio {
+                session_id,
+                sample_rate: 16_000,
+                audio_b64,
+                engine: engine.clone(),
+            },
+        )
+        .await
+        {
+            ptt_log(format!("live_dictation: feed_audio: {e}"));
             continue;
         }
 
-        match wait_ptt_partial_transcript(&state, seq, local_side.clone()).await {
-            Ok(text) => {
-                let t = text.trim().to_string();
-                if !t.is_empty() {
-                    let t_paste = match apply_dictation_postprocess(&app, &state, t.clone()) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            ptt_log(format!("live_dictation: postprocess partial: {e}"));
-                            t.clone()
-                        }
-                    };
-                    let replace_prior = state
-                        .live_dictation_did_paste
-                        .load(Ordering::SeqCst);
-                    if replace_prior {
-                        let n = state.live_last_paste_undo_ops.load(Ordering::SeqCst);
-                        if n > 0 {
-                            if let Err(e) = paste::undo_n_times_at_focus_spawn(&app, n).await {
-                                ptt_log(format!("live_dictation: undo before partial: {e}"));
-                            }
-                        }
-                    }
-                    match paste::paste_text_at_focus_spawn(&app, t_paste).await {
-                        Ok(ops) => {
-                            state
-                                .live_dictation_did_paste
-                                .store(true, Ordering::SeqCst);
-                            state
-                                .live_last_paste_undo_ops
-                                .store(ops, Ordering::SeqCst);
-                            *state.live_last_partial_text.lock().await = t;
-                        }
-                        Err(e) => ptt_log(format!("live_dictation: paste partial: {e}")),
-                    }
-                }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        if let Ok(Some((text, is_final))) = {
+            let local_side = state.sidecar.lock().await.clone();
+            if let Some(side) = local_side {
+                side.pop_stream_for_session(session_id).await
+            } else if let Some(rem) = state.remote.lock().await.as_ref() {
+                let mut q = rem.pending.lock().await;
+                pop_sidecar_stream_for_session(&mut q, session_id)
+            } else {
+                Ok(None)
             }
-            Err(e) => ptt_log(format!("live_dictation: partial wait: {e}")),
+        } {
+            if !text.trim().is_empty() && !is_final {
+                paste_live_partial(&app, &state, text).await;
+            }
         }
     }
 }
 
-async fn wait_ptt_partial_transcript(
-    state: &AppState,
-    seq: u64,
-    local_sidecar: Option<Arc<SidecarSession>>,
-) -> Result<String, String> {
-    const TIMEOUT: Duration = Duration::from_secs(120);
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        if Instant::now() > deadline {
-            return Err("Live dictation partial timed out".into());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let raw = if let Some(side) = local_sidecar.as_ref() {
-            side.pop_partial_for_seq(seq).await?
-        } else if let Some(rem) = state.remote.lock().await.as_ref() {
-            let mut q = rem.pending.lock().await;
-            pop_sidecar_partial_for_seq(&mut q, seq)?
-        } else {
-            return Err("Engine not started".into());
-        };
-        if let Some(t) = raw {
-            return Ok(t);
+async fn end_live_stream(app: &tauri::AppHandle, state: &AppState) -> Option<String> {
+    let conn = match open_db(app) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    if !live_preview_wanted(&conn) {
+        return None;
+    }
+    let session_id = state.live_stream_session_id.load(Ordering::SeqCst);
+    if session_id == 0 {
+        return None;
+    }
+    let engine = live_streaming_engine(&conn);
+    let _guard = state.inference_io_lock.lock().await;
+    if send_sidecar_msg(
+        state,
+        SidecarIn::EndStream {
+            session_id,
+            engine,
+        },
+    )
+    .await
+    .is_err()
+    {
+        return None;
+    }
+    match wait_stream_final(state, session_id).await {
+        Ok(t) if !t.trim().is_empty() => Some(t),
+        Ok(_) => None,
+        Err(e) => {
+            ptt_log(format!("live_dictation: stream final: {e}"));
+            None
         }
     }
 }
@@ -1147,6 +1305,11 @@ pub(crate) async fn ptt_start_inner(app: &tauri::AppHandle, state: &AppState) ->
     state
         .live_last_paste_undo_ops
         .store(0, Ordering::SeqCst);
+    state.live_audio_cursor.store(0, Ordering::SeqCst);
+    let session_id = next_seq(&state.seq);
+    state
+        .live_stream_session_id
+        .store(session_id, Ordering::SeqCst);
     *state.live_last_partial_text.lock().await = String::new();
     let conn = open_db(app)?;
     let device_name = get_setting(&conn, "input_device_name")
@@ -1188,6 +1351,7 @@ async fn ptt_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
 pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> Result<String, String> {
     ptt_log("ptt_stop: begin");
     abort_live_preview_task(state).await;
+    let stream_final = end_live_stream(app, state).await;
     let _undo_live = UndoLiveDictationOnPttStopEnd {
         app: app.clone(),
         flag: Arc::clone(&state.live_dictation_did_paste),
@@ -1250,7 +1414,9 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
         return Ok(String::new());
     }
 
-    let live_commit = if live_preview_wanted(&conn) {
+    let live_commit = if let Some(t) = stream_final {
+        Some(t)
+    } else if live_preview_wanted(&conn) {
         let g = state.live_last_partial_text.lock().await;
         let t = g.trim();
         if t.is_empty() {
@@ -1264,7 +1430,7 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
 
     if let Some(raw) = live_commit {
         ptt_log(format!(
-            "ptt_stop: live dictation — commit last partial only (skip merged Whisper) raw_chars={}",
+            "ptt_stop: live dictation — commit streaming final raw_chars={}",
             raw.len()
         ));
         let combined = apply_dictation_postprocess(app, state, raw)?;
@@ -1457,6 +1623,102 @@ async fn ptt_stop(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
     ptt_stop_inner(&app, &state).await
 }
 
+/// How long to wait for file transcription. Scales with media length (CPU/GPU often runs several× realtime).
+fn file_transcribe_timeout(duration_secs: Option<f64>) -> Duration {
+    const MIN_SECS: u64 = 600;
+    const MAX_SECS: u64 = 14_400;
+    const DEFAULT_SECS: u64 = 7200;
+    const RTF_FACTOR: f64 = 4.0;
+    const BUFFER_SECS: u64 = 300;
+
+    let secs = match duration_secs {
+        Some(d) if d.is_finite() && d > 0.0 => {
+            let scaled = (d * RTF_FACTOR).ceil() as u64 + BUFFER_SECS;
+            scaled.clamp(MIN_SECS, MAX_SECS)
+        }
+        _ => DEFAULT_SECS,
+    };
+    Duration::from_secs(secs)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscribeFileProgress {
+    path: String,
+    percent: f32,
+}
+
+async fn wait_file_transcript(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    path: &str,
+    local_sidecar: Option<Arc<SidecarSession>>,
+) -> Result<String, String> {
+    let mut timeout = file_transcribe_timeout(None);
+    let mut deadline = Instant::now() + timeout;
+    let mut duration_applied = false;
+
+    loop {
+        if Instant::now() > deadline {
+            let waited = timeout.as_secs() / 60;
+            return Err(format!(
+                "Transcription timed out after ~{waited} minutes. Long files can take several× realtime on CPU/GPU — retry or use a smaller Whisper model."
+            ));
+        }
+
+        if !duration_applied {
+            let started = if let Some(side) = local_sidecar.as_ref() {
+                side.take_file_started_for_path(path).await
+            } else if let Some(rem) = state.remote.lock().await.as_ref() {
+                let mut q = rem.pending.lock().await;
+                take_file_started_for_path(&mut q, path)
+            } else {
+                return Err("Engine not started".into());
+            };
+            if let Some(duration_secs) = started {
+                duration_applied = true;
+                timeout = file_transcribe_timeout(duration_secs);
+                let new_deadline = Instant::now() + timeout;
+                if new_deadline > deadline {
+                    deadline = new_deadline;
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        if let Some(percent) = if let Some(side) = local_sidecar.as_ref() {
+            side.take_file_progress_for_path(path).await
+        } else if let Some(rem) = state.remote.lock().await.as_ref() {
+            let mut q = rem.pending.lock().await;
+            take_file_progress_for_path(&mut q, path)
+        } else {
+            None
+        } {
+            let _ = app.emit(
+                "transcribe_file_progress",
+                TranscribeFileProgress {
+                    path: path.to_string(),
+                    percent,
+                },
+            );
+        }
+
+        let raw = if let Some(side) = local_sidecar.as_ref() {
+            side.pop_file_done_for_path(path).await?
+        } else if let Some(rem) = state.remote.lock().await.as_ref() {
+            let mut q = rem.pending.lock().await;
+            pop_sidecar_file_done_for_path(&mut q, path)?
+        } else {
+            return Err("Engine not started".into());
+        };
+
+        if let Some(text) = raw {
+            return Ok(text);
+        }
+    }
+}
+
 #[tauri::command]
 async fn transcribe_file(
     app: tauri::AppHandle,
@@ -1467,8 +1729,9 @@ async fn transcribe_file(
     state.inference_busy.store(true, Ordering::SeqCst);
     ensure_local_model_loaded(&app, &state).await?;
     let msg = SidecarIn::TranscribeFile { path: path.clone() };
+    let local_side = state.sidecar.lock().await.clone();
     let _io = state.inference_io_lock.lock().await;
-    if let Some(side) = state.sidecar.lock().await.clone() {
+    if let Some(side) = local_side.as_ref() {
         side.send(&msg).await?;
     } else if let Some(rem) = state.remote.lock().await.as_ref() {
         rem.tx.send(msg).map_err(|e| e.to_string())?;
@@ -1477,55 +1740,33 @@ async fn transcribe_file(
     }
     drop(_io);
 
-    for _ in 0..600 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Some(side) = state.sidecar.lock().await.clone() {
-            match side.pop_file_done_for_path(&path).await {
-                Ok(Some(text)) => {
-                    let tone = open_db(&app)
-                        .ok()
-                        .and_then(|c| get_setting(&c, "tone_preset").ok().flatten())
-                        .unwrap_or_else(|| "standard".into());
-                    let conn = open_db(&app)?;
-                    let corrections =
-                        load_corrections_for_postprocess(&conn).map_err(|e| e.to_string())?;
-                    let dictionary =
-                        load_dictionary_for_postprocess(&conn).map_err(|e| e.to_string())?;
-                    let out = pipeline(&text, &corrections, &dictionary, &tone, &state.tone_dir);
-                    *state.last_transcript.lock().await = out.clone();
-                    touch_model_activity(&state);
-                    return Ok(out);
-                }
-                Err(message) => return Err(message),
-                Ok(None) => {}
-            }
-        }
-        if let Some(rem) = state.remote.lock().await.as_ref() {
-            let mut q = rem.pending.lock().await;
-            while let Some(m) = q.pop_front() {
-                match m {
-                    SidecarOut::FileDone { path: p, text } if p == path => {
-                        let tone = open_db(&app)
-                            .ok()
-                            .and_then(|c| get_setting(&c, "tone_preset").ok().flatten())
-                            .unwrap_or_else(|| "standard".into());
-                        let conn = open_db(&app)?;
-                        let corrections =
-                            load_corrections_for_postprocess(&conn).map_err(|e| e.to_string())?;
-                        let dictionary =
-                            load_dictionary_for_postprocess(&conn).map_err(|e| e.to_string())?;
-                        let out = pipeline(&text, &corrections, &dictionary, &tone, &state.tone_dir);
-                        *state.last_transcript.lock().await = out.clone();
-                        touch_model_activity(&state);
-                        return Ok(out);
-                    }
-                    SidecarOut::Error { message } => return Err(message),
-                    _ => {}
-                }
-            }
-        }
-    }
-    Err("Transcription timed out".into())
+    let _ = app.emit(
+        "transcribe_file_progress",
+        TranscribeFileProgress {
+            path: path.clone(),
+            percent: 0.0,
+        },
+    );
+
+    let text = wait_file_transcript(&app, &state, &path, local_side).await?;
+    let tone = open_db(&app)
+        .ok()
+        .and_then(|c| get_setting(&c, "tone_preset").ok().flatten())
+        .unwrap_or_else(|| "standard".into());
+    let conn = open_db(&app)?;
+    let corrections = load_corrections_for_postprocess(&conn).map_err(|e| e.to_string())?;
+    let dictionary = load_dictionary_for_postprocess(&conn).map_err(|e| e.to_string())?;
+    let out = pipeline(&text, &corrections, &dictionary, &tone, &state.tone_dir);
+    *state.last_transcript.lock().await = out.clone();
+    let _ = app.emit(
+        "transcribe_file_progress",
+        TranscribeFileProgress {
+            path: path.clone(),
+            percent: 100.0,
+        },
+    );
+    touch_model_activity(&state);
+    Ok(out)
 }
 
 #[derive(Serialize)]
@@ -1620,6 +1861,35 @@ async fn install_nvidia_whisper_libs(app: tauri::AppHandle) -> Result<String, St
         .map_err(|e| e.to_string())?
 }
 
+/// Stop engine, HUD, node server, and global shortcuts so exit does not leave ghost hotkeys.
+fn cleanup_before_exit(app: &tauri::AppHandle) {
+    let _ = app.global_shortcut().unregister_all();
+
+    if let Some(hud_win) = app.get_webview_window(hud::LABEL) {
+        let _ = hud_win.close();
+    }
+
+    let state = app.state::<AppState>();
+    state.idle_run_id.fetch_add(1, Ordering::SeqCst);
+    state.ptt_session_active.store(false, Ordering::SeqCst);
+    state.inference_busy.store(false, Ordering::SeqCst);
+    state.local_model_in_memory.store(false, Ordering::SeqCst);
+
+    let _ = tauri::async_runtime::block_on(async {
+        if let Some(s) = state.sidecar.lock().await.take() {
+            let _ = s.send(&SidecarIn::Shutdown).await;
+        }
+        if let Some(r) = state.remote.lock().await.take() {
+            let _ = r.tx.send(SidecarIn::Shutdown);
+        }
+        let mut node = state.yapper_node.lock().await;
+        if let Some(mut child) = node.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1655,14 +1925,18 @@ pub fn run() {
                 .iter()
                 .find(|w| w.label == "main")
                 .ok_or_else(|| "tauri.conf.json must define a window labeled \"main\"")?;
-            WebviewWindowBuilder::from_config(app.handle(), main_cfg)?
+            let main_win = WebviewWindowBuilder::from_config(app.handle(), main_cfg)?
                 .on_navigation(|url| allow_navigation_in_webview(url))
                 .on_new_window(|url, _| handle_new_window_request(url))
                 .build()?;
-
-            let show_i = MenuItem::with_id(app, "show", "Show Yapper", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            let app_for_close = app.handle().clone();
+            main_win.on_window_event(move |event| {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    cleanup_before_exit(&app_for_close);
+                    app_for_close.exit(0);
+                }
+            });
 
             let bundled_icon = app.default_window_icon().cloned();
             // With `devUrl` (localhost), WebView2 on Windows often leaves the taskbar/title icon as the
@@ -1675,34 +1949,6 @@ pub fn run() {
                 let _ = main.set_icon(icon.clone());
                 win_taskbar_icon::apply_taskbar_big_icon(&main, icon);
             }
-
-            let mut tray = TrayIconBuilder::new();
-            if let Some(icon) = bundled_icon {
-                tray = tray.icon(icon);
-            }
-            let _tray = tray
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(move |app, event| match event.id.as_ref() {
-                    "quit" => app.exit(0),
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { .. } = event {
-                        let app = tray.app_handle();
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
-                })
-                .build(app)?;
 
             let _ = global_shortcuts::refresh(&handle);
 
@@ -1743,6 +1989,11 @@ pub fn run() {
             node_server::yapper_node_start,
             node_server::yapper_node_stop,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let RunEvent::Exit = event {
+                cleanup_before_exit(app_handle);
+            }
+        });
 }

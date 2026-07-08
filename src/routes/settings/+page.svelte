@@ -15,9 +15,16 @@
   } from "$lib/theme";
   import {
     DEFAULT_PARAKEET_MODEL,
+    migrateParakeetModelId,
     PARAKEET_MODEL_OPTIONS,
     parakeetDiskMb,
   } from "$lib/parakeetModelInfo";
+  import {
+    DEFAULT_LIVE_STREAMING_ENGINE,
+    DEFAULT_LIVE_STREAMING_MODEL,
+    LIVE_STREAMING_ENGINES,
+    liveStreamingModelsForEngine,
+  } from "$lib/liveStreamingModelInfo";
   import {
     formatStorageMb,
     isMlxWhisperModelId,
@@ -86,12 +93,18 @@
   let whisperConditionOnPrevious = $state(false);
   let whisperInitialPrompt = $state("");
   let whisperLanguage = $state("");
-  let whisperVadFilterPcm = $state(false);
+  let whisperVadFilterPcm = $state(true);
   let whisperVadFilterFile = $state(true);
 
   let liveDictationExperimental = $state(false);
-  let liveChunkIntervalMs = $state("2000");
+  let liveStreamingEngine = $state(DEFAULT_LIVE_STREAMING_ENGINE);
+  let liveStreamingModel = $state(DEFAULT_LIVE_STREAMING_MODEL);
+  let liveFeedIntervalMs = $state("200");
   let liveMinAudioMs = $state("800");
+
+  const liveStreamingModelChoices = $derived(
+    liveStreamingModelsForEngine(liveStreamingEngine),
+  );
 
   let kPtt = $state("");
   let kMic = $state("");
@@ -197,9 +210,6 @@
       (await invoke<string | null>("get_setting_cmd", { key: "remote_token" })) ?? "";
     engine =
       (await invoke<string | null>("get_setting_cmd", { key: "engine" })) ?? "whisper";
-    if (appIsMac && engine === "parakeet") {
-      engine = "whisper";
-    }
     whisperModel =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_model" })) ??
       "base";
@@ -224,9 +234,10 @@
       whisperModel = "base";
     }
     {
-      const pk =
+      const pk = migrateParakeetModelId(
         (await invoke<string | null>("get_setting_cmd", { key: "parakeet_model" })) ??
-        DEFAULT_PARAKEET_MODEL;
+          DEFAULT_PARAKEET_MODEL,
+      );
       parakeetModel = PARAKEET_MODEL_OPTIONS.some((o) => o.id === pk)
         ? pk
         : DEFAULT_PARAKEET_MODEL;
@@ -301,8 +312,8 @@
     whisperLanguage =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_language" })) ?? "";
     whisperVadFilterPcm =
-      (await invoke<string | null>("get_setting_cmd", { key: "whisper_vad_filter_pcm" })) ===
-      "true";
+      (await invoke<string | null>("get_setting_cmd", { key: "whisper_vad_filter_pcm" })) !==
+      "false";
     whisperVadFilterFile =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_vad_filter_file" })) !==
       "false";
@@ -311,9 +322,19 @@
       (await invoke<string | null>("get_setting_cmd", {
         key: "live_dictation_experimental",
       })) === "true";
-    liveChunkIntervalMs =
+    liveStreamingEngine =
+      (await invoke<string | null>("get_setting_cmd", { key: "live_streaming_engine" })) ??
+      DEFAULT_LIVE_STREAMING_ENGINE;
+    liveStreamingModel =
+      (await invoke<string | null>("get_setting_cmd", { key: "live_streaming_model" })) ??
+      DEFAULT_LIVE_STREAMING_MODEL;
+    if (!liveStreamingModelsForEngine(liveStreamingEngine).some((o) => o.id === liveStreamingModel)) {
+      liveStreamingModel = liveStreamingModelsForEngine(liveStreamingEngine)[0]?.id ?? DEFAULT_LIVE_STREAMING_MODEL;
+    }
+    liveFeedIntervalMs =
+      (await invoke<string | null>("get_setting_cmd", { key: "live_feed_interval_ms" })) ??
       (await invoke<string | null>("get_setting_cmd", { key: "live_chunk_interval_ms" })) ??
-      "2000";
+      "200";
     liveMinAudioMs =
       (await invoke<string | null>("get_setting_cmd", { key: "live_min_audio_ms" })) ?? "800";
 
@@ -606,8 +627,16 @@
       value: liveDictationExperimental ? "true" : "false",
     });
     await invoke("set_setting_cmd", {
-      key: "live_chunk_interval_ms",
-      value: String(Math.round(n(liveChunkIntervalMs, 2000))),
+      key: "live_streaming_engine",
+      value: liveStreamingEngine,
+    });
+    await invoke("set_setting_cmd", {
+      key: "live_streaming_model",
+      value: liveStreamingModel,
+    });
+    await invoke("set_setting_cmd", {
+      key: "live_feed_interval_ms",
+      value: String(Math.round(n(liveFeedIntervalMs, 200))),
     });
     await invoke("set_setting_cmd", {
       key: "live_min_audio_ms",
@@ -906,12 +935,16 @@
       <select id="eng" bind:value={engine}>
         <option value="whisper">Whisper (recommended)</option>
         {#if !appIsMac}
-          <option value="parakeet" disabled={!cuda}>Parakeet (NVIDIA GPU only)</option>
+          <option value="parakeet">Parakeet (ONNX — CPU or GPU)</option>
+        {:else}
+          <option value="parakeet">Parakeet (ONNX — CPU)</option>
         {/if}
       </select>
     </div>
-    {#if !cuda && !appIsMac}
-      <p class="note">Parakeet needs an NVIDIA GPU. Whisper works on CPU or NVIDIA.</p>
+    {#if engine === "parakeet"}
+      <p class="note">
+        Parakeet runs via sherpa-onnx with built-in punctuation. CUDA is recommended on Windows/Linux; CPU works too.
+      </p>
     {/if}
     <div class="field">
       {#if engine === "whisper"}
@@ -942,19 +975,7 @@
           {/each}
         </select>
         <p class="field-hint">
-          English checkpoints from Hugging Face; first load downloads weights (sizes are approximate). CUDA on the
-          inference host is required.
-        </p>
-        <p class="note">
-          <strong>NeMo is not bundled with Yapper.</strong> Install the
-          <a
-            href="https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/starthere/intro.html#installation"
-            target="_blank"
-            rel="noopener noreferrer"
-            >NVIDIA NeMo Framework</a
-          >
-          separately in the Python environment that runs the sidecar (or your Yapper Node). &ldquo;Install GPU libraries
-          for Whisper&rdquo; does not install NeMo.
+          sherpa-onnx INT8 checkpoints; first load downloads from GitHub (~670 MB). Works on CPU or GPU.
         </p>
       {/if}
     </div>
@@ -1188,7 +1209,8 @@
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={whisperVadFilterPcm} />
-        Extra voice detection on live mic (can drop normal speech — leave off unless needed)
+        Extra Silero voice detection on live mic (v6; Rust noise gate runs first — turn off if speech
+        is dropped)
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={whisperVadFilterFile} />
@@ -1197,36 +1219,57 @@
 
       <h3 class="settings-subh">Experimental live dictation</h3>
       <p class="note">
-        While you hold push-to-talk (or the mic is open), Yapper pastes rolling text into the <strong>focused</strong>
-        field using the same clipboard + paste as normal dictation. Each update undoes the previous live paste, then
-        pastes the new chunk. When you release, the last live paste is undone and the <strong>same</strong> text is
-        pasted again after dictionary / tone / corrections — there is no second full Whisper pass on the whole clip.
-        Requires a working undo stack in the target app (many editors OK; some web apps are flaky). Whisper only — not
-        Parakeet. Extra CPU/GPU use while speaking.
+        True streaming ASR while you hold push-to-talk: text appears in the <strong>focused</strong> field with low
+        latency. Uses Moonshine or Sherpa streaming engines (separate from the batch Whisper/Parakeet engine above).
+        Each update undoes the previous live paste; on release the final transcript is pasted again after dictionary /
+        tone / corrections. Requires a working undo stack in the target app.
       </p>
       <label class="check">
-        <input
-          type="checkbox"
-          bind:checked={liveDictationExperimental}
-          disabled={engine !== "whisper"}
-        />
+        <input type="checkbox" bind:checked={liveDictationExperimental} />
         Type live into focused field (experimental)
       </label>
-      {#if engine !== "whisper"}
-        <p class="field-hint">Switch recognition engine to Whisper to use live dictation.</p>
-      {/if}
       <div class="field">
-        <label for="liveIv">Preview interval (ms)</label>
+        <label for="liveEng">Live streaming engine</label>
+        <select
+          id="liveEng"
+          bind:value={liveStreamingEngine}
+          disabled={!liveDictationExperimental}
+          onchange={() => {
+            const choices = liveStreamingModelsForEngine(liveStreamingEngine);
+            if (!choices.some((o) => o.id === liveStreamingModel)) {
+              liveStreamingModel = choices[0]?.id ?? DEFAULT_LIVE_STREAMING_MODEL;
+            }
+          }}
+        >
+          {#each LIVE_STREAMING_ENGINES as e}
+            <option value={e.id}>{e.line}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="field">
+        <label for="liveModel">Live streaming model</label>
+        <select
+          id="liveModel"
+          bind:value={liveStreamingModel}
+          disabled={!liveDictationExperimental}
+        >
+          {#each liveStreamingModelChoices as m}
+            <option value={m.id}>{m.line}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="field">
+        <label for="liveIv">Audio feed interval (ms)</label>
         <input
           id="liveIv"
           type="number"
-          min="500"
+          min="100"
           max="30000"
-          step="100"
-          bind:value={liveChunkIntervalMs}
-          disabled={!liveDictationExperimental || engine !== "whisper"}
+          step="50"
+          bind:value={liveFeedIntervalMs}
+          disabled={!liveDictationExperimental}
         />
-        <p class="field-hint">How often to send an audio snapshot (500–30000). Default 2000.</p>
+        <p class="field-hint">How often to send new audio to the streaming engine (100–30000). Default 200.</p>
       </div>
       <div class="field">
         <label for="liveMin">Minimum audio (ms)</label>
@@ -1237,9 +1280,9 @@
           max="10000"
           step="50"
           bind:value={liveMinAudioMs}
-          disabled={!liveDictationExperimental || engine !== "whisper"}
+          disabled={!liveDictationExperimental}
         />
-        <p class="field-hint">Skip a tick if the buffer is shorter than this (200–10000). Default 800.</p>
+        <p class="field-hint">Skip early ticks if the buffer is shorter than this (200–10000). Default 800.</p>
       </div>
     {/if}
 

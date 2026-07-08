@@ -26,7 +26,7 @@ pub struct WhisperDecodeOptions {
     pub initial_prompt: String,
     /// Empty string → auto language detection in the sidecar.
     pub language: String,
-    /// Silero VAD inside faster-whisper on live chunks (often harms mic audio; default off).
+    /// Silero VAD inside faster-whisper on live chunks (Silero v6; Rust energy gate runs first).
     pub vad_filter_pcm: bool,
     /// VAD for file transcription (usually helpful on files).
     pub vad_filter_file: bool,
@@ -62,6 +62,21 @@ pub enum SidecarIn {
     UnloadModel,
     /// Load weights if unloaded (no-op if already loaded).
     EnsureModel,
+    StartStream {
+        session_id: u64,
+        engine: String,
+        model: String,
+    },
+    FeedAudio {
+        session_id: u64,
+        sample_rate: u32,
+        audio_b64: String,
+        engine: String,
+    },
+    EndStream {
+        session_id: u64,
+        engine: String,
+    },
     Shutdown,
 }
 
@@ -77,8 +92,21 @@ pub enum SidecarOut {
     },
     Partial { text: String, seq: u64 },
     Final { text: String, seq: u64, rtf: Option<f64> },
+    StreamStarted { session_id: u64 },
+    StreamPartial {
+        session_id: u64,
+        text: String,
+        #[serde(default)]
+        is_stable: bool,
+    },
+    StreamFinal { session_id: u64, text: String },
     Error { message: String },
     FileProgress { path: String, percent: f32 },
+    FileStarted {
+        path: String,
+        #[serde(default)]
+        duration_secs: Option<f64>,
+    },
     FileDone { path: String, text: String },
     ModelState { loaded: bool },
 }
@@ -118,6 +146,63 @@ pub(crate) fn pop_sidecar_partial_for_seq(
     Ok(None)
 }
 
+/// Remove the first `StreamPartial` or `StreamFinal` for `session_id`.
+pub(crate) fn pop_sidecar_stream_for_session(
+    q: &mut VecDeque<SidecarOut>,
+    session_id: u64,
+) -> Result<Option<(String, bool)>, String> {
+    let mut i = 0usize;
+    while i < q.len() {
+        match &q[i] {
+            SidecarOut::Error { message } => {
+                let msg = message.clone();
+                q.remove(i);
+                return Err(msg);
+            }
+            SidecarOut::StreamFinal {
+                session_id: sid,
+                text,
+            } if *sid == session_id => {
+                let t = text.clone();
+                q.remove(i);
+                return Ok(Some((t, true)));
+            }
+            SidecarOut::StreamPartial {
+                session_id: sid,
+                text,
+                ..
+            } if *sid == session_id => {
+                let t = text.clone();
+                q.remove(i);
+                return Ok(Some((t, false)));
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(None)
+}
+
+/// Wait until `StreamStarted` for `session_id` is seen (and removed).
+pub(crate) fn take_stream_started_for_session(
+    q: &mut VecDeque<SidecarOut>,
+    session_id: u64,
+) -> bool {
+    let mut i = 0usize;
+    while i < q.len() {
+        if let SidecarOut::StreamStarted {
+            session_id: sid,
+        } = &q[i]
+        {
+            if *sid == session_id {
+                q.remove(i);
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Remove the first `Final` for `seq`, or the first `Error`. Other events stay queued.
 pub(crate) fn pop_sidecar_transcript_for_seq(
     q: &mut VecDeque<SidecarOut>,
@@ -155,6 +240,56 @@ pub(crate) fn pop_sidecar_transcript_for_seq(
     Ok(None)
 }
 
+/// Remove the first `FileStarted` for `path`.
+/// - `None` — event not seen yet
+/// - `Some(None)` — seen, duration unknown
+/// - `Some(Some(d))` — seen with duration hint
+pub(crate) fn take_file_started_for_path(
+    q: &mut VecDeque<SidecarOut>,
+    path: &str,
+) -> Option<Option<f64>> {
+    let mut i = 0usize;
+    while i < q.len() {
+        if let SidecarOut::FileStarted {
+            path: p,
+            duration_secs,
+        } = &q[i]
+        {
+            if p == path {
+                let d = *duration_secs;
+                q.remove(i);
+                return Some(d);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Remove all `FileProgress` for `path` and return the highest percent seen.
+pub(crate) fn take_file_progress_for_path(
+    q: &mut VecDeque<SidecarOut>,
+    path: &str,
+) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    let mut i = 0usize;
+    while i < q.len() {
+        if let SidecarOut::FileProgress {
+            path: p,
+            percent,
+        } = &q[i]
+        {
+            if p == path {
+                best = Some(best.map_or(*percent, |b| b.max(*percent)));
+                q.remove(i);
+                continue;
+            }
+        }
+        i += 1;
+    }
+    best
+}
+
 /// Like transcript pop: first `Error` fails the wait; remove matching `FileDone` or drop matching `FileProgress`.
 pub(crate) fn pop_sidecar_file_done_for_path(
     q: &mut VecDeque<SidecarOut>,
@@ -179,6 +314,9 @@ pub(crate) fn pop_sidecar_file_done_for_path(
             SidecarOut::FileProgress { path: p, .. } if p == path => {
                 q.remove(i);
             }
+            SidecarOut::FileStarted { path: p, .. } if p == path => {
+                q.remove(i);
+            }
             _ => i += 1,
         }
     }
@@ -198,6 +336,16 @@ pub(crate) fn sidecar_out_one_liner(m: &SidecarOut) -> String {
         ),
         SidecarOut::Partial { seq, text } => format!("partial(seq={seq}, chars={})", text.len()),
         SidecarOut::Final { seq, text, .. } => format!("final(seq={seq}, chars={})", text.len()),
+        SidecarOut::StreamStarted { session_id } => format!("stream_started(id={session_id})"),
+        SidecarOut::StreamPartial {
+            session_id,
+            text,
+            ..
+        } => format!("stream_partial(id={session_id}, chars={})", text.len()),
+        SidecarOut::StreamFinal {
+            session_id,
+            text,
+        } => format!("stream_final(id={session_id}, chars={})", text.len()),
         SidecarOut::Error { message } => {
             let short: String = message.chars().take(100).collect();
             format!("error({short})")
@@ -205,6 +353,13 @@ pub(crate) fn sidecar_out_one_liner(m: &SidecarOut) -> String {
         SidecarOut::FileProgress { path, percent } => {
             format!("file_progress({percent:.0}% path_len={})", path.len())
         }
+        SidecarOut::FileStarted {
+            path,
+            duration_secs,
+        } => format!(
+            "file_started(duration_secs={duration_secs:?}, path_len={})",
+            path.len()
+        ),
         SidecarOut::FileDone { path, text } => {
             format!("file_done(chars={}, path_len={})", text.len(), path.len())
         }
@@ -431,6 +586,14 @@ impl SidecarSession {
         meta
     }
 
+    pub async fn pop_stream_for_session(
+        &self,
+        session_id: u64,
+    ) -> Result<Option<(String, bool)>, String> {
+        let mut q = self.pending.lock().await;
+        pop_sidecar_stream_for_session(&mut q, session_id)
+    }
+
     pub async fn pop_transcript_for_seq(&self, seq: u64) -> Result<Option<String>, String> {
         let mut q = self.pending.lock().await;
         pop_sidecar_transcript_for_seq(&mut q, seq)
@@ -444,6 +607,16 @@ impl SidecarSession {
     pub async fn pop_file_done_for_path(&self, path: &str) -> Result<Option<String>, String> {
         let mut q = self.pending.lock().await;
         pop_sidecar_file_done_for_path(&mut q, path)
+    }
+
+    pub async fn take_file_started_for_path(&self, path: &str) -> Option<Option<f64>> {
+        let mut q = self.pending.lock().await;
+        take_file_started_for_path(&mut q, path)
+    }
+
+    pub async fn take_file_progress_for_path(&self, path: &str) -> Option<f32> {
+        let mut q = self.pending.lock().await;
+        take_file_progress_for_path(&mut q, path)
     }
 
     pub async fn pending_debug_line(&self) -> String {

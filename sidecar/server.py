@@ -24,6 +24,11 @@ USE_MLX = False
 # Last init parameters for EnsureModel / unload / reload
 CONFIG: dict[str, Any] = {}
 
+try:
+    from engines import moonshine_stream, parakeet_sherpa, sherpa_stream
+except ImportError:
+    from .engines import moonshine_stream, parakeet_sherpa, sherpa_stream
+
 
 def _verbose() -> bool:
     v = os.environ.get("YAPPER_VERBOSE", "").strip().lower()
@@ -80,18 +85,8 @@ def unload_whisper() -> None:
 
 def list_engines() -> list[str]:
     engines = ["whisper"]
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            try:
-                import nemo.collections.asr  # noqa: F401
-
-                engines.append("parakeet")
-            except ImportError:
-                pass
-    except ImportError:
-        pass
+    if parakeet_sherpa.available():
+        engines.append("parakeet")
     return engines
 
 
@@ -368,12 +363,28 @@ def store_config(
     CONFIG["whisper"] = dict(whisper) if isinstance(whisper, dict) else {}
 
 
+def load_parakeet_for_config(model: str, device: str, model_dir: Optional[str]) -> None:
+    global MODEL, MODEL_NAME, USE_MLX
+    USE_MLX = False
+    parakeet_sherpa.load(model, device, model_dir)
+    MODEL = object()
+    MODEL_NAME = parakeet_sherpa.model_id()
+
+
+def load_engine_for_config(
+    model: str, device: str, compute_type: str, model_dir: Optional[str]
+) -> None:
+    engine = (CONFIG.get("engine") or "whisper").lower()
+    if engine == "parakeet":
+        load_parakeet_for_config(model, device, model_dir)
+    else:
+        load_whisper_for_config(model, device, compute_type, model_dir)
+
+
 def load_from_config() -> None:
     if CONFIG.get("mock"):
         return
-    if CONFIG.get("engine") != "whisper":
-        raise RuntimeError("Only whisper supports reload in this sidecar")
-    load_whisper_for_config(
+    load_engine_for_config(
         CONFIG["model"],
         CONFIG["device"],
         CONFIG["compute_type"],
@@ -449,11 +460,18 @@ def _segment_probs(seg: Any) -> tuple[str, float, Any]:
     return t, nsp, alp
 
 
+def _segment_end_s(seg: Any) -> float:
+    if isinstance(seg, dict):
+        return float(seg.get("end", 0) or 0)
+    return float(getattr(seg, "end", 0) or 0)
+
+
 def _filtered_text_from_segments(
     segments: Any,
     *,
     log_tag: str,
     fallback_text: Optional[str] = None,
+    on_segment_end: Optional[Any] = None,
 ) -> str:
     """Same post-filter as live faster-whisper PCM: drop no-speech / bad logprob / common hallucinations."""
     parts: list[str] = []
@@ -461,6 +479,8 @@ def _filtered_text_from_segments(
     n_kept = 0
     for seg in segments or []:
         n_seg += 1
+        if on_segment_end is not None:
+            on_segment_end(_segment_end_s(seg))
         t, nsp, alp = _segment_probs(seg)
         if not t:
             continue
@@ -526,7 +546,7 @@ def build_transcribe_kwargs(*, for_file: bool) -> dict[str, Any]:
     vad_filter = (
         _w_bool(w, "vad_filter_file", True)
         if for_file
-        else _w_bool(w, "vad_filter_pcm", False)
+        else _w_bool(w, "vad_filter_pcm", True)
     )
 
     kw: dict[str, Any] = dict(
@@ -607,6 +627,10 @@ def transcribe_pcm_i16(pcm: bytes, sample_rate: int) -> tuple[str, float]:
     if MODEL is None:
         return "", 0.0
 
+    engine = (CONFIG.get("engine") or "whisper").lower()
+    if engine == "parakeet":
+        return parakeet_sherpa.transcribe_pcm_i16(pcm, sample_rate)
+
     if USE_MLX:
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
         before = len(audio)
@@ -684,21 +708,63 @@ def handle_init(msg: dict) -> None:
     sys.stderr.flush()
 
     if engine == "parakeet":
-        emit(
-            {
-                "type": "error",
-                "message": "Parakeet requires NeMo + CUDA. Install NVIDIA NeMo toolkit or switch engine to whisper in Settings.",
-            }
-        )
+        if not parakeet_sherpa.available():
+            emit(
+                {
+                    "type": "error",
+                    "message": "Parakeet requires sherpa-onnx. Reinstall the bundled Python runtime or run: pip install sherpa-onnx",
+                }
+            )
+            emit(
+                {
+                    "type": "ready",
+                    "engines": list_engines(),
+                    "inference_device": "cpu",
+                    "compute_type": compute,
+                }
+            )
+            return
+        if MOCK:
+            MODEL = None
+            MODEL_NAME = model
+            emit(
+                {
+                    "type": "ready",
+                    "engines": list_engines(),
+                    "inference_device": "mock",
+                    "compute_type": compute,
+                }
+            )
+            return
+        if lazy_load:
+            unload_whisper()
+            parakeet_sherpa.unload()
+            MODEL = None
+            emit({"type": "model_state", "loaded": False})
+            emit(
+                {
+                    "type": "ready",
+                    "engines": list_engines(),
+                    "inference_device": "pending_first_use",
+                    "compute_type": compute,
+                }
+            )
+            return
+        try:
+            load_parakeet_for_config(model, dev, model_dir)
+        except Exception as e:
+            emit({"type": "error", "message": f"Parakeet load failed: {e}"})
+            return
+        DEVICE = dev
+        emit({"type": "model_state", "loaded": True})
         emit(
             {
                 "type": "ready",
                 "engines": list_engines(),
-                "inference_device": "cpu",
+                "inference_device": DEVICE,
                 "compute_type": compute,
             }
         )
-        vlog("handle_init done (parakeet path)")
         return
 
     if MOCK:
@@ -759,9 +825,6 @@ def handle_init(msg: dict) -> None:
 def handle_ensure_model() -> None:
     global DEVICE, MODEL_NAME
     vlog(f"handle_ensure_model MODEL_is_none={MODEL is None}")
-    if CONFIG.get("engine") == "parakeet":
-        emit({"type": "error", "message": "Parakeet is not loaded in this sidecar"})
-        return
     if MOCK:
         MODEL_NAME = CONFIG.get("model", "base")
         emit({"type": "model_state", "loaded": True})
@@ -772,16 +835,82 @@ def handle_ensure_model() -> None:
     try:
         load_from_config()
     except Exception as e:
-        emit({"type": "error", "message": f"Whisper load failed: {e}"})
+        emit({"type": "error", "message": f"Model load failed: {e}"})
         return
+    engine = (CONFIG.get("engine") or "whisper").lower()
     DEVICE = "mlx" if USE_MLX else CONFIG["device"]
     MODEL_NAME = CONFIG["model"]
+    if engine == "parakeet":
+        MODEL_NAME = parakeet_sherpa.model_id()
     emit({"type": "model_state", "loaded": True})
 
 
 def handle_unload_model() -> None:
     unload_whisper()
+    parakeet_sherpa.unload()
     emit({"type": "model_state", "loaded": False})
+
+
+def handle_start_stream(msg: dict) -> None:
+    session_id = int(msg.get("session_id", 0))
+    engine = (msg.get("engine") or "moonshine").lower()
+    model = msg.get("model") or ""
+    model_dir = CONFIG.get("model_dir")
+    device = CONFIG.get("device") or "cpu"
+    try:
+        if engine == "sherpa":
+            if not sherpa_stream.available():
+                raise RuntimeError("sherpa-onnx is not installed")
+            sherpa_stream.start_session(session_id, model, device, model_dir)
+        elif engine == "moonshine":
+            if not moonshine_stream.available():
+                raise RuntimeError("moonshine-voice is not installed")
+            moonshine_stream.start_session(session_id, model, model_dir)
+        else:
+            raise RuntimeError(f"Unknown streaming engine: {engine}")
+        emit({"type": "stream_started", "session_id": session_id})
+    except Exception as e:
+        emit({"type": "error", "message": f"start_stream failed: {e}"})
+
+
+def handle_feed_audio(msg: dict) -> None:
+    session_id = int(msg.get("session_id", 0))
+    sr = int(msg.get("sample_rate", 16000))
+    b64 = msg.get("audio_b64", "")
+    engine = (msg.get("engine") or CONFIG.get("live_streaming_engine") or "moonshine").lower()
+    try:
+        pcm = base64.b64decode(b64)
+    except Exception as e:
+        emit({"type": "error", "message": f"bad audio: {e}"})
+        return
+    try:
+        if engine == "sherpa":
+            text = sherpa_stream.feed_session(session_id, pcm, sr)
+        else:
+            text = moonshine_stream.feed_session(session_id, pcm, sr)
+        emit(
+            {
+                "type": "stream_partial",
+                "session_id": session_id,
+                "text": text,
+                "is_stable": False,
+            }
+        )
+    except Exception as e:
+        emit({"type": "error", "message": f"feed_audio failed: {e}"})
+
+
+def handle_end_stream(msg: dict) -> None:
+    session_id = int(msg.get("session_id", 0))
+    engine = (msg.get("engine") or CONFIG.get("live_streaming_engine") or "moonshine").lower()
+    try:
+        if engine == "sherpa":
+            text = sherpa_stream.end_session(session_id)
+        else:
+            text = moonshine_stream.end_session(session_id)
+        emit({"type": "stream_final", "session_id": session_id, "text": text})
+    except Exception as e:
+        emit({"type": "error", "message": f"end_stream failed: {e}"})
 
 
 def handle_chunk(msg: dict) -> None:
@@ -835,6 +964,55 @@ def handle_chunk(msg: dict) -> None:
         emit({"type": "error", "message": f"transcribe failed: {e}"})
 
 
+def probe_audio_duration_secs(path: str) -> float | None:
+    """Best-effort media duration for scaling client-side wait timeouts."""
+    try:
+        import av
+
+        with av.open(path) as container:
+            if container.duration is not None:
+                return float(container.duration) / float(av.time_base)
+    except Exception:
+        pass
+    return None
+
+
+def _emit_file_progress(path: str, percent: float) -> None:
+    emit({"type": "file_progress", "path": path, "percent": round(percent, 1)})
+
+
+def _run_with_time_estimated_progress(
+    path: str,
+    duration_secs: float | None,
+    work: Any,
+) -> Any:
+    """Emit coarse progress while a blocking transcribe call runs (e.g. MLX)."""
+    import threading
+
+    stop = threading.Event()
+
+    def ticker() -> None:
+        if duration_secs is None or duration_secs <= 0:
+            return
+        estimated = max(duration_secs * 2.0, 30.0)
+        t0 = time.perf_counter()
+        last = 10.0
+        while not stop.wait(0.75):
+            elapsed = time.perf_counter() - t0
+            pct = min(95.0, 10.0 + 85.0 * (elapsed / estimated))
+            if pct >= last + 2.0:
+                _emit_file_progress(path, pct)
+                last = pct
+
+    th = threading.Thread(target=ticker, daemon=True)
+    th.start()
+    try:
+        return work()
+    finally:
+        stop.set()
+        th.join(timeout=0.2)
+
+
 def handle_file(msg: dict) -> None:
     path = msg.get("path", "")
     p = Path(path)
@@ -850,28 +1028,49 @@ def handle_file(msg: dict) -> None:
         emit({"type": "error", "message": "Model not loaded"})
         return
 
-    emit({"type": "file_progress", "path": path, "percent": 10.0})
+    duration_secs = probe_audio_duration_secs(str(p))
+    emit({"type": "file_started", "path": path, "duration_secs": duration_secs})
+    _emit_file_progress(path, 5.0)
     try:
-        if USE_MLX:
-            result = _call_mlx_transcribe(str(p), for_file=True)
-            text = _mlx_result_to_text(result, log_tag="transcribe_file_mlx")
+        engine = (CONFIG.get("engine") or "whisper").lower()
+        if engine == "parakeet":
+            text = parakeet_sherpa.transcribe_file(str(p))
+        elif USE_MLX:
+            def mlx_work() -> str:
+                result = _call_mlx_transcribe(str(p), for_file=True)
+                return _mlx_result_to_text(result, log_tag="transcribe_file_mlx")
+
+            text = _run_with_time_estimated_progress(path, duration_secs, mlx_work)
         else:
             t_kw = build_transcribe_kwargs(for_file=True)
             hst = _w_float(CONFIG.get("whisper") or {}, "hallucination_silence_threshold", 1.6)
             try:
-                segments, _ = MODEL.transcribe(
+                segments, info = MODEL.transcribe(
                     str(p),
                     **t_kw,
                     hallucination_silence_threshold=hst,
                 )
             except TypeError:
-                segments, _ = MODEL.transcribe(str(p), **t_kw)
+                segments, info = MODEL.transcribe(str(p), **t_kw)
+            total_dur = float(getattr(info, "duration", 0) or duration_secs or 0)
+            last_pct = 5.0
+
+            def on_segment_end(end_s: float) -> None:
+                nonlocal last_pct
+                if total_dur <= 0:
+                    return
+                pct = min(99.0, 5.0 + 94.0 * (end_s / total_dur))
+                if pct >= last_pct + 1.0:
+                    _emit_file_progress(path, pct)
+                    last_pct = pct
+
             text = _filtered_text_from_segments(
                 segments,
                 log_tag="transcribe_file",
                 fallback_text=None,
+                on_segment_end=on_segment_end,
             )
-        emit({"type": "file_progress", "path": path, "percent": 100.0})
+        _emit_file_progress(path, 100.0)
         emit({"type": "file_done", "path": path, "text": text})
     except Exception as e:
         emit({"type": "error", "message": str(e)})
@@ -880,9 +1079,8 @@ def handle_file(msg: dict) -> None:
 def main() -> None:
     if sys.version_info >= (3, 13):
         sys.stderr.write(
-            "yapper-sidecar: Python 3.13+ often has no ctranslate2 / PyTorch wheels yet. "
-            "If dictation fails, install Python 3.10–3.12, run pip install -r sidecar/requirements.txt, "
-            "and set YAPPER_PYTHON to that python.exe (Windows: py -0p lists installs).\n"
+            "yapper-sidecar: Python 3.13+ may need a recent ctranslate2 wheel. "
+            "Bundled installs use Python 3.12. For dev, Python 3.10–3.12 is recommended.\n"
         )
         sys.stderr.flush()
     vlog("sidecar main loop ready (reading stdin JSON lines)")
@@ -900,6 +1098,12 @@ def main() -> None:
         vlog(f"dispatch type={t!r}")
         if t == "init":
             handle_init(msg)
+        elif t == "start_stream":
+            handle_start_stream(msg)
+        elif t == "feed_audio":
+            handle_feed_audio(msg)
+        elif t == "end_stream":
+            handle_end_stream(msg)
         elif t == "chunk":
             handle_chunk(msg)
         elif t == "transcribe_file":

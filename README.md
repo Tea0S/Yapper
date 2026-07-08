@@ -38,11 +38,13 @@ pip install -r sidecar/requirements-macos.txt
 
 Release installers that include **no separate Python install** use `src-tauri/resources/python-runtime/` (gitignored): on Windows run `npm run pack:release`; on macOS (Apple Silicon) run `npm run bundle:python:mac` then `npm run tauri build` (see **macOS app (packaged)** below).
 
-### Parakeet and NVIDIA NeMo (optional)
+### Parakeet (optional)
 
-The **Parakeet** engine needs the **NVIDIA NeMo** toolkit and a **CUDA**-capable GPU on the machine that runs inference. NeMo is **not** included in Yapper’s bundled Python runtime (`npm run pack:release` / `bundle:python`); install it yourself into the same Python environment that runs `sidecar/server.py`, or into the environment on a remote **Yapper Node** if you use Parakeet there. Use the official guide: **[NVIDIA NeMo Framework — installation](https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/starthere/intro.html#installation)**.
+The **Parakeet** engine uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) INT8 ONNX models bundled via `sidecar/requirements.txt`. It runs on **CPU or GPU** (CUDA via ONNX Runtime when available) and includes punctuation/capitalization out of the box. Models download automatically on first use from the [sherpa-onnx asr-models release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models).
 
-The in-app **Install GPU libraries for Whisper** action only adds libraries for faster-whisper (CTranslate2); it does **not** install NeMo.
+**Live dictation** (Settings → Experimental) uses separate streaming engines: **Moonshine v2** or **Sherpa Parakeet Unified streaming** — not the batch Whisper/Parakeet engine.
+
+The in-app **Install GPU libraries for Whisper** action only adds libraries for faster-whisper (CTranslate2); Parakeet ONNX uses ONNX Runtime from the `sherpa-onnx` wheel.
 
 ### `program not found` / `cargo metadata` failed
 
@@ -96,7 +98,7 @@ python yapper-node/main.py --host 0.0.0.0 --port 8765 --token %YAPPER_TOKEN%
 
 In **Settings**, choose *Remote Yapper Node*, set the WebSocket URL and token. Prefer Tailscale/WireGuard; do not expose the node to the public internet without TLS and stronger auth.
 
-If you use **Parakeet** against a remote node, that machine needs **NeMo** installed as well — see **[NeMo installation](https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/starthere/intro.html#installation)**.
+If you use **Parakeet** against a remote node, that machine needs the same `sherpa-onnx` sidecar dependencies (`pip install -r sidecar/requirements.txt`).
 
 Protocol: [docs/protocol.md](docs/protocol.md).
 
