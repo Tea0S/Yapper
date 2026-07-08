@@ -12,6 +12,11 @@ import warnings
 from pathlib import Path
 from typing import Any, Optional
 
+# Ensure `engines/` resolves when the sidecar is launched from Tauri (any cwd).
+_SIDECAR_DIR = Path(__file__).resolve().parent
+if str(_SIDECAR_DIR) not in sys.path:
+    sys.path.insert(0, str(_SIDECAR_DIR))
+
 # requests/urllib3 pin skew in global site-packages floods stderr; not fatal for dictation.
 warnings.filterwarnings("ignore", message=r".*doesn't match a supported version.*")
 

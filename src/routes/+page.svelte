@@ -251,7 +251,7 @@
     <a class="btn" href="/settings">Open settings</a>
   </div>
 
-  {#if lastError && engine?.ready}
+  {#if lastError}
     <p class="warn engine-action-err" role="alert">{lastError}</p>
   {/if}
 

@@ -393,6 +393,20 @@ impl SidecarSession {
             return Err(format!("Sidecar script not found: {}", script.display()));
         }
         let mut cmd = Command::new(python);
+        // Embeddable CPython (Windows release bundle) does not put the script directory on
+        // sys.path; server.py inserts it, but set PYTHONPATH for non-embeddable fallbacks.
+        if let Some(parent) = script.parent() {
+            let sidecar_dir = parent.to_string_lossy();
+            #[cfg(windows)]
+            let sep = ';';
+            #[cfg(not(windows))]
+            let sep = ':';
+            let merged = match std::env::var("PYTHONPATH") {
+                Ok(old) if !old.is_empty() => format!("{sidecar_dir}{sep}{old}"),
+                _ => sidecar_dir.into_owned(),
+            };
+            cmd.env("PYTHONPATH", merged);
+        }
         cmd.arg(script.as_os_str())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
