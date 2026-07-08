@@ -8,6 +8,7 @@
   type MicLevel = { rms: number; peak: number };
 
   let phase = $state<HudPhase>("idle");
+  let preview = $state("");
   let mic = $state<MicLevel>({ rms: 0, peak: 0 });
   /** Layout/styling only — from Rust `cfg!(target_os = "macos")`, never UA sniffing. */
   let isMacChrome = $state(false);
@@ -114,8 +115,9 @@
     const tick = async () => {
       if (dead) return;
       try {
-        const snap = await invoke<{ phase: HudPhase }>("hud_snapshot");
+        const snap = await invoke<{ phase: HudPhase; preview: string }>("hud_snapshot");
         phase = snap.phase;
+        preview = snap.preview ?? "";
       } catch {
         phase = "hidden";
       }
@@ -163,14 +165,19 @@
         onkeydown={onPillKeydown}
       >
         {#if expanded}
-          <div class="dots" aria-hidden="true">
-            {#each Array.from({ length: dotCount }, (_, i) => i) as i (i)}
-              <span
-                class="dot"
-                class:busy={phase === "transcribing"}
-                style="--lvl: {phase === 'listening' ? dotLevel(i) : 0.22}"
-              ></span>
-            {/each}
+          <div class="live-wrap">
+            <div class="dots" aria-hidden="true">
+              {#each Array.from({ length: dotCount }, (_, i) => i) as i (i)}
+                <span
+                  class="dot"
+                  class:busy={phase === "transcribing"}
+                  style="--lvl: {phase === 'listening' ? dotLevel(i) : 0.22}"
+                ></span>
+              {/each}
+            </div>
+            {#if phase === "listening" && preview.trim()}
+              <p class="live-preview" aria-live="polite">{preview}</p>
+            {/if}
           </div>
         {:else}
           <span class="idle-cap" aria-hidden="true"></span>
@@ -358,6 +365,27 @@
     width: 100%;
     max-width: 100%;
     padding: 0 2px;
+  }
+
+  .live-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    width: 100%;
+  }
+
+  .live-preview {
+    margin: 0;
+    padding: 0 4px 2px;
+    font-size: 11px;
+    line-height: 1.35;
+    font-weight: 500;
+    color: rgba(248, 250, 252, 0.92);
+    text-align: center;
+    word-wrap: break-word;
+    max-height: 4.2em;
+    overflow: hidden;
   }
 
   .pill.macos .dots {

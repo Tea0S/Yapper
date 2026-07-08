@@ -147,7 +147,7 @@ async fn send_sidecar_msg(state: &AppState, msg: SidecarIn) -> Result<(), String
 }
 
 async fn wait_stream_started(state: &AppState, session_id: u64) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if Instant::now() > deadline {
             return Err("Stream start timed out".into());
@@ -218,46 +218,16 @@ async fn wait_stream_final(state: &AppState, session_id: u64) -> Result<String, 
     }
 }
 
-async fn paste_live_partial(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    raw: String,
-) {
+async fn update_live_hud_preview(state: &AppState, raw: String) {
     let t = raw.trim().to_string();
     if t.is_empty() {
         return;
     }
-    {
-        let mut last = state.live_last_paste_at.lock().expect("live_last_paste_at");
-        if last.elapsed() < Duration::from_millis(150) {
-            return;
-        }
-        *last = Instant::now();
+    let mut g = state.live_hud_preview.lock().await;
+    if *g != t {
+        *g = t.clone();
     }
-    let t_paste = match apply_dictation_postprocess(app, state, t.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            ptt_log(format!("live_dictation: postprocess partial: {e}"));
-            t.clone()
-        }
-    };
-    let replace_prior = state.live_dictation_did_paste.load(Ordering::SeqCst);
-    if replace_prior {
-        let n = state.live_last_paste_undo_ops.load(Ordering::SeqCst);
-        if n > 0 {
-            if let Err(e) = paste::undo_n_times_at_focus_spawn(app, n).await {
-                ptt_log(format!("live_dictation: undo before partial: {e}"));
-            }
-        }
-    }
-    match paste::paste_text_at_focus_spawn(app, t_paste).await {
-        Ok(ops) => {
-            state.live_dictation_did_paste.store(true, Ordering::SeqCst);
-            state.live_last_paste_undo_ops.store(ops, Ordering::SeqCst);
-            *state.live_last_partial_text.lock().await = t;
-        }
-        Err(e) => ptt_log(format!("live_dictation: paste partial: {e}")),
-    }
+    *state.live_last_partial_text.lock().await = t;
 }
 
 /// If experimental live dictation pasted into the focused field, undo the full paste sequence so the final paste replaces it.
@@ -478,7 +448,7 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
             }
         } {
             if !text.trim().is_empty() && !is_final {
-                paste_live_partial(&app, &state, text).await;
+                update_live_hud_preview(&state, text).await;
             }
         }
     }
@@ -1311,6 +1281,8 @@ pub(crate) async fn ptt_start_inner(app: &tauri::AppHandle, state: &AppState) ->
         .live_stream_session_id
         .store(session_id, Ordering::SeqCst);
     *state.live_last_partial_text.lock().await = String::new();
+    *state.live_last_pasted_display.lock().await = String::new();
+    *state.live_hud_preview.lock().await = String::new();
     let conn = open_db(app)?;
     let device_name = get_setting(&conn, "input_device_name")
         .map_err(|e| e.to_string())?
@@ -1351,6 +1323,7 @@ async fn ptt_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
 pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> Result<String, String> {
     ptt_log("ptt_stop: begin");
     abort_live_preview_task(state).await;
+    *state.live_hud_preview.lock().await = String::new();
     let stream_final = end_live_stream(app, state).await;
     let _undo_live = UndoLiveDictationOnPttStopEnd {
         app: app.clone(),
@@ -1438,6 +1411,13 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
             "ptt_stop: live commit done combined_chars={}",
             combined.len()
         ));
+        *state.live_hud_preview.lock().await = String::new();
+        if !combined.is_empty() {
+            let _ = paste::paste_text_at_focus_spawn(app, combined.clone()).await;
+        }
+        state
+            .live_dictation_did_paste
+            .store(false, Ordering::SeqCst);
         *state.last_transcript.lock().await = combined.clone();
         let _ = app.emit("transcript", combined.clone());
         touch_model_activity(state);
@@ -1772,6 +1752,7 @@ async fn transcribe_file(
 #[derive(Serialize)]
 struct HudSnapshot {
     phase: HudPhase,
+    preview: String,
 }
 
 #[derive(Serialize)]
@@ -1794,7 +1775,15 @@ fn hud_chrome_info() -> HudChromeInfo {
 #[tauri::command]
 fn hud_snapshot(state: State<'_, AppState>) -> Result<HudSnapshot, String> {
     let g = state.hud_phase.lock().map_err(|e| e.to_string())?;
-    Ok(HudSnapshot { phase: *g })
+    let preview = if *g == HudPhase::Listening {
+        state.live_hud_preview.blocking_lock().clone()
+    } else {
+        String::new()
+    };
+    Ok(HudSnapshot {
+        phase: *g,
+        preview,
+    })
 }
 
 /// Apply `hud_widget_enabled` and whether the engine is running — show, hide, or keep hidden.

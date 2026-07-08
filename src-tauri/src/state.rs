@@ -57,6 +57,10 @@ pub struct AppState {
     pub live_last_paste_undo_ops: Arc<AtomicU32>,
     /// Raw text from the last successful live partial (for debugging / fallback).
     pub live_last_partial_text: Arc<Mutex<String>>,
+    /// Post-processed text currently visible in the focused field from live partial pastes.
+    pub live_last_pasted_display: Arc<Mutex<String>>,
+    /// Live streaming preview shown on the HUD while push-to-talk is held.
+    pub live_hud_preview: Arc<Mutex<String>>,
     /// Sample index into the PTT buffer already sent to the streaming engine.
     pub live_audio_cursor: Arc<AtomicU32>,
     /// Active streaming session id (sidecar IPC).
@@ -91,6 +95,8 @@ impl AppState {
             live_dictation_did_paste: Arc::new(AtomicBool::new(false)),
             live_last_paste_undo_ops: Arc::new(AtomicU32::new(0)),
             live_last_partial_text: Arc::new(Mutex::new(String::new())),
+            live_last_pasted_display: Arc::new(Mutex::new(String::new())),
+            live_hud_preview: Arc::new(Mutex::new(String::new())),
             live_audio_cursor: Arc::new(AtomicU32::new(0)),
             live_stream_session_id: Arc::new(AtomicU64::new(0)),
             live_last_paste_at: Arc::new(std::sync::Mutex::new(Instant::now())),

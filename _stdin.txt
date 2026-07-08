@@ -1,0 +1,2 @@
+{"type":"init","model":"base","device":"cpu","compute_type":"int8","model_dir":"C:/Users/Bambi/AppData/Local/com.yapper.app/models","mock":false,"engine":"whisper","lazy_load":true}
+{"type":"start_stream","session_id":42,"engine":"moonshine","model":"small_streaming"}

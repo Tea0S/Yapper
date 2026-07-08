@@ -1219,14 +1219,13 @@
 
       <h3 class="settings-subh">Experimental live dictation</h3>
       <p class="note">
-        True streaming ASR while you hold push-to-talk: text appears in the <strong>focused</strong> field with low
-        latency. Uses Moonshine or Sherpa streaming engines (separate from the batch Whisper/Parakeet engine above).
-        Each update undoes the previous live paste; on release the final transcript is pasted again after dictionary /
-        tone / corrections. Requires a working undo stack in the target app.
+        Low-latency streaming while you hold push-to-talk: words appear in the <strong>HUD widget</strong> as you
+        speak, then paste into the focused field when you release. Uses Moonshine or Sherpa streaming (separate from
+        the batch Whisper/Parakeet engine). On release, dictionary / tone / corrections are applied once.
       </p>
       <label class="check">
         <input type="checkbox" bind:checked={liveDictationExperimental} />
-        Type live into focused field (experimental)
+        Type live into HUD while holding (experimental)
       </label>
       <div class="field">
         <label for="liveEng">Live streaming engine</label>
