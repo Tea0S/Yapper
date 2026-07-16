@@ -35,9 +35,19 @@ function parseGithubRepo(conf) {
 }
 
 function releaseTag(version) {
-  const t = process.env.GITHUB_REF_NAME || process.env.YAPPER_RELEASE_TAG;
-  if (t) return t;
-  return version;
+  // Prefer an explicit CI tag. Do not trust GITHUB_REF_NAME alone: on branch pushes
+  // GitHub sets it to "main"/"master" and ignores job-level env overrides of GITHUB_*.
+  const explicit = (process.env.YAPPER_RELEASE_TAG || "").trim();
+  if (explicit) return explicit;
+
+  const ref = (process.env.GITHUB_REF_NAME || "").trim();
+  if (ref && /^v?\d+\.\d+/.test(ref)) {
+    return ref.startsWith("v") ? ref : `v${ref}`;
+  }
+
+  const v = (version || "").trim();
+  if (!v) throw new Error("missing version for release tag");
+  return v.startsWith("v") ? v : `v${v}`;
 }
 
 function assetUrl(owner, repo, tag, fileName) {

@@ -65,7 +65,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     env:
-      GITHUB_REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
+      # GITHUB_REF_NAME cannot be overridden on branch pushes — use YAPPER_RELEASE_TAG.
+      YAPPER_RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
       # Tauri reads this when signing updater artifacts (file alone is not enough on CI).
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     steps:
@@ -127,7 +128,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 120
     env:
-      GITHUB_REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
+      YAPPER_RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
@@ -167,11 +168,15 @@ jobs:
         run: |
           mkdir -p upload
           shopt -s nullglob
+          # Updater + installers only — skip build helpers like bundle_dmg.sh / icon.icns.
           for d in src-tauri/target/release/bundle/dmg src-tauri/target/release/bundle/macos; do
             if [ -d "$d" ]; then
               for f in "$d"/*; do
                 [ -f "$f" ] || continue
-                cp "$f" upload/
+                base="$(basename "$f")"
+                case "$base" in
+                  *.app.tar.gz|*.app.tar.gz.sig|*.dmg|*.dmg.sig) cp "$f" upload/ ;;
+                esac
               done
             fi
           done
@@ -206,13 +211,31 @@ jobs:
 
       - name: Merge latest.json
         env:
-          GITHUB_REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
+          YAPPER_RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           mkdir -p release-out
           node scripts/updater-manifest.mjs merge \
             assets/windows/platforms.partial.json \
             assets/macos/platforms.partial.json \
             -o release-out/latest.json
+
+      - name: Rewrite download URLs to release tag
+        env:
+          YAPPER_RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const tag = process.env.YAPPER_RELEASE_TAG;
+            if (!tag) throw new Error("YAPPER_RELEASE_TAG missing");
+            const p = "release-out/latest.json";
+            const m = JSON.parse(fs.readFileSync(p, "utf8"));
+            for (const plat of Object.values(m.platforms || {})) {
+              if (!plat.url) continue;
+              plat.url = plat.url.replace(/\/releases\/download\/[^/]+\//, `/releases/download/${tag}/`);
+            }
+            fs.writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
+            console.log("Pinned updater URLs to", tag);
+          '
 
       - name: Stage release binaries
         run: |
