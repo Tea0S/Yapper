@@ -1,7 +1,7 @@
 """Streaming live dictation via moonshine-voice."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +42,25 @@ def resolve_model(model_name: str, model_dir: str | None) -> tuple[str, Any]:
     return get_model_for_language("en", **kwargs)
 
 
-def _line_text(event: Any) -> str:
-    line = getattr(event, "line", None)
-    if line is None:
+def _lines_to_text(lines: Any) -> str:
+    """Build preview text from Moonshine lines without doubling cumulative hypotheses."""
+    parts: list[str] = []
+    for line in lines:
+        t = str(getattr(line, "text", "") or "").strip()
+        if t:
+            parts.append(t)
+    if not parts:
         return ""
-    return str(getattr(line, "text", "") or "").strip()
+    # If each line is a growing rewrite of the same utterance, join duplicates it.
+    cumulative = True
+    for i in range(1, len(parts)):
+        prev, cur = parts[i - 1], parts[i]
+        if not (cur.startswith(prev) or prev.startswith(cur)):
+            cumulative = False
+            break
+    if cumulative:
+        return max(parts, key=len)
+    return " ".join(parts)
 
 
 def _transcript_text(transcriber: Any) -> str:
@@ -60,12 +74,7 @@ def _transcript_text(transcriber: Any) -> str:
     lines = getattr(tr, "lines", None)
     if not lines:
         return ""
-    parts: list[str] = []
-    for line in lines:
-        t = str(getattr(line, "text", "") or "").strip()
-        if t:
-            parts.append(t)
-    return " ".join(parts)
+    return _lines_to_text(lines)
 
 
 @dataclass
@@ -80,35 +89,14 @@ class StreamSession:
     def _ensure(self) -> None:
         if self.transcriber is not None:
             return
-        from moonshine_voice import Transcriber, TranscriptEventListener
+        from moonshine_voice import Transcriber
 
         model_path, model_arch = resolve_model(self.model_name, self.model_dir)
-
-        class _Listener(TranscriptEventListener):
-            def __init__(self, outer: StreamSession) -> None:
-                self._outer = outer
-
-            def on_line_text_changed(self, event: Any) -> None:
-                text = _line_text(event)
-                if text:
-                    self._outer.last_text = text
-
-            def on_line_updated(self, event: Any) -> None:
-                text = _line_text(event)
-                if text:
-                    self._outer.last_text = text
-
-            def on_line_completed(self, event: Any) -> None:
-                text = _line_text(event)
-                if text:
-                    self._outer.last_text = text
-
         self.transcriber = Transcriber(
             model_path=model_path,
             model_arch=model_arch,
             update_interval=0.25,
         )
-        self.transcriber.add_listener(_Listener(self))
 
     def start(self) -> None:
         self._ensure()

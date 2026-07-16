@@ -38,7 +38,7 @@ use audio::{
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use postprocess::pipeline;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 fn whisper_decode_options_from_db(conn: &rusqlite::Connection) -> WhisperDecodeOptions {
@@ -228,31 +228,6 @@ async fn update_live_hud_preview(state: &AppState, raw: String) {
         *g = t.clone();
     }
     *state.live_last_partial_text.lock().await = t;
-}
-
-/// If experimental live dictation pasted into the focused field, undo the full paste sequence so the final paste replaces it.
-struct UndoLiveDictationOnPttStopEnd {
-    app: tauri::AppHandle,
-    flag: Arc<AtomicBool>,
-    undo_ops: Arc<AtomicU32>,
-}
-
-impl Drop for UndoLiveDictationOnPttStopEnd {
-    fn drop(&mut self) {
-        if !self.flag.swap(false, Ordering::SeqCst) {
-            return;
-        }
-        let app = self.app.clone();
-        let n = self.undo_ops.load(Ordering::SeqCst);
-        if n == 0 {
-            return;
-        }
-        // Never block a Tokio worker on `mpsc::recv` waiting for the main thread.
-        let _ = std::thread::spawn(move || {
-            let _ = paste::undo_n_times_at_focus_on_main_thread(&app, n);
-        })
-        .join();
-    }
 }
 
 async fn abort_live_preview_task(state: &AppState) {
@@ -454,17 +429,18 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
     }
 }
 
-async fn end_live_stream(app: &tauri::AppHandle, state: &AppState) -> Option<String> {
+/// Tear down the live streaming session. Discarded text — paste uses batch ASR.
+async fn end_live_stream(app: &tauri::AppHandle, state: &AppState) {
     let conn = match open_db(app) {
         Ok(c) => c,
-        Err(_) => return None,
+        Err(_) => return,
     };
     if !live_preview_wanted(&conn) {
-        return None;
+        return;
     }
     let session_id = state.live_stream_session_id.load(Ordering::SeqCst);
     if session_id == 0 {
-        return None;
+        return;
     }
     let engine = live_streaming_engine(&conn);
     let _guard = state.inference_io_lock.lock().await;
@@ -478,15 +454,10 @@ async fn end_live_stream(app: &tauri::AppHandle, state: &AppState) -> Option<Str
     .await
     .is_err()
     {
-        return None;
+        return;
     }
-    match wait_stream_final(state, session_id).await {
-        Ok(t) if !t.trim().is_empty() => Some(t),
-        Ok(_) => None,
-        Err(e) => {
-            ptt_log(format!("live_dictation: stream final: {e}"));
-            None
-        }
+    if let Err(e) = wait_stream_final(state, session_id).await {
+        ptt_log(format!("live_dictation: stream final (ignored): {e}"));
     }
 }
 
@@ -1269,19 +1240,12 @@ async fn wait_ptt_chunk_transcript(
 
 pub(crate) async fn ptt_start_inner(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
     ptt_log("ptt_start: begin");
-    state
-        .live_dictation_did_paste
-        .store(false, Ordering::SeqCst);
-    state
-        .live_last_paste_undo_ops
-        .store(0, Ordering::SeqCst);
     state.live_audio_cursor.store(0, Ordering::SeqCst);
     let session_id = next_seq(&state.seq);
     state
         .live_stream_session_id
         .store(session_id, Ordering::SeqCst);
     *state.live_last_partial_text.lock().await = String::new();
-    *state.live_last_pasted_display.lock().await = String::new();
     *state.live_hud_preview.lock().await = String::new();
     let conn = open_db(app)?;
     let device_name = get_setting(&conn, "input_device_name")
@@ -1324,12 +1288,10 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
     ptt_log("ptt_stop: begin");
     abort_live_preview_task(state).await;
     *state.live_hud_preview.lock().await = String::new();
-    let stream_final = end_live_stream(app, state).await;
-    let _undo_live = UndoLiveDictationOnPttStopEnd {
-        app: app.clone(),
-        flag: Arc::clone(&state.live_dictation_did_paste),
-        undo_ops: Arc::clone(&state.live_last_paste_undo_ops),
-    };
+    // Preview-only: tear down the streaming session. Never paste stream_final —
+    // Moonshine/Sherpa often stutter or double near endpoint; batch Whisper/Parakeet commits.
+    end_live_stream(app, state).await;
+    *state.live_last_partial_text.lock().await = String::new();
     let _hud_collapse = hud::HudCollapseAfterPtt::new(&app);
     {
         let mut g = state.hud_phase.lock().map_err(|e| e.to_string())?;
@@ -1387,41 +1349,8 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
         return Ok(String::new());
     }
 
-    let live_commit = if let Some(t) = stream_final {
-        Some(t)
-    } else if live_preview_wanted(&conn) {
-        let g = state.live_last_partial_text.lock().await;
-        let t = g.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    } else {
-        None
-    };
-
-    if let Some(raw) = live_commit {
-        ptt_log(format!(
-            "ptt_stop: live dictation — commit streaming final raw_chars={}",
-            raw.len()
-        ));
-        let combined = apply_dictation_postprocess(app, state, raw)?;
-        ptt_log(format!(
-            "ptt_stop: live commit done combined_chars={}",
-            combined.len()
-        ));
-        *state.live_hud_preview.lock().await = String::new();
-        if !combined.is_empty() {
-            let _ = paste::paste_text_at_focus_spawn(app, combined.clone()).await;
-        }
-        state
-            .live_dictation_did_paste
-            .store(false, Ordering::SeqCst);
-        *state.last_transcript.lock().await = combined.clone();
-        let _ = app.emit("transcript", combined.clone());
-        touch_model_activity(state);
-        return Ok(combined);
+    if live_preview_wanted(&conn) {
+        ptt_log("ptt_stop: live preview was on — commit via batch Whisper/Parakeet (not stream_final)");
     }
 
     ensure_local_model_loaded(&app, &state).await?;

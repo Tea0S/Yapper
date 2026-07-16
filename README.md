@@ -42,7 +42,7 @@ Release installers that include **no separate Python install** use `src-tauri/re
 
 The **Parakeet** engine uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) INT8 ONNX models bundled via `sidecar/requirements.txt`. It runs on **CPU or GPU** (CUDA via ONNX Runtime when available) and includes punctuation/capitalization out of the box. Models download automatically on first use from the [sherpa-onnx asr-models release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models).
 
-**Live dictation** (Settings → Experimental) uses separate streaming engines: **Moonshine v2** or **Sherpa Parakeet Unified streaming** — not the batch Whisper/Parakeet engine.
+**Live dictation** (Settings → Experimental) streams a HUD preview via **Moonshine v2** or **Sherpa Parakeet Unified streaming**; the pasted transcript on release still comes from the batch Whisper/Parakeet engine.
 
 The in-app **Install GPU libraries for Whisper** action only adds libraries for faster-whisper (CTranslate2); Parakeet ONNX uses ONNX Runtime from the `sherpa-onnx` wheel.
 

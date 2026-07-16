@@ -51,22 +51,14 @@ pub struct AppState {
     /// Optional Yapper Node WebSocket server (`yapper-node/main.py`).
     pub yapper_node: Arc<Mutex<Option<Child>>>,
     pub yapper_node_logs: Arc<Mutex<VecDeque<String>>>,
-    /// True after experimental live dictation pasted at least once into the focused field this session.
-    pub live_dictation_did_paste: Arc<AtomicBool>,
-    /// How many Ctrl+Z / ⌘Z steps undo the last live paste (multi-step when using Shift+Enter line breaks).
-    pub live_last_paste_undo_ops: Arc<AtomicU32>,
-    /// Raw text from the last successful live partial (for debugging / fallback).
+    /// Raw text from the last live streaming partial (HUD preview / debug).
     pub live_last_partial_text: Arc<Mutex<String>>,
-    /// Post-processed text currently visible in the focused field from live partial pastes.
-    pub live_last_pasted_display: Arc<Mutex<String>>,
     /// Live streaming preview shown on the HUD while push-to-talk is held.
     pub live_hud_preview: Arc<Mutex<String>>,
     /// Sample index into the PTT buffer already sent to the streaming engine.
     pub live_audio_cursor: Arc<AtomicU32>,
     /// Active streaming session id (sidecar IPC).
     pub live_stream_session_id: Arc<AtomicU64>,
-    /// Minimum ms between live paste updates (undo+paste throttle).
-    pub live_last_paste_at: Arc<std::sync::Mutex<Instant>>,
     /// Serialize sidecar/remote stdin `Chunk` (and related wait) so live and final never interleave.
     pub inference_io_lock: Arc<Mutex<()>>,
     /// Background live dictation loop; aborted when dictation stops.
@@ -92,14 +84,10 @@ impl AppState {
             ptt_hotkey_start_pending: Arc::new(StdMutex::new(None)),
             yapper_node: Arc::new(Mutex::new(None)),
             yapper_node_logs: Arc::new(Mutex::new(VecDeque::new())),
-            live_dictation_did_paste: Arc::new(AtomicBool::new(false)),
-            live_last_paste_undo_ops: Arc::new(AtomicU32::new(0)),
             live_last_partial_text: Arc::new(Mutex::new(String::new())),
-            live_last_pasted_display: Arc::new(Mutex::new(String::new())),
             live_hud_preview: Arc::new(Mutex::new(String::new())),
             live_audio_cursor: Arc::new(AtomicU32::new(0)),
             live_stream_session_id: Arc::new(AtomicU64::new(0)),
-            live_last_paste_at: Arc::new(std::sync::Mutex::new(Instant::now())),
             inference_io_lock: Arc::new(Mutex::new(())),
             live_loop_handle: Arc::new(Mutex::new(None)),
         }

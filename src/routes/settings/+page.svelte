@@ -1219,13 +1219,14 @@
 
       <h3 class="settings-subh">Experimental live dictation</h3>
       <p class="note">
-        Low-latency streaming while you hold push-to-talk: words appear in the <strong>HUD widget</strong> as you
-        speak, then paste into the focused field when you release. Uses Moonshine or Sherpa streaming (separate from
-        the batch Whisper/Parakeet engine). On release, dictionary / tone / corrections are applied once.
+        While you hold push-to-talk, Moonshine or Sherpa streams a live preview into the <strong>HUD widget</strong>.
+        On release, the paste uses your normal batch Whisper/Parakeet engine (same as live-off dictation) so the
+        final text does not inherit streaming stutter or doubled words. Dictionary / tone / corrections still apply
+        once on that commit.
       </p>
       <label class="check">
         <input type="checkbox" bind:checked={liveDictationExperimental} />
-        Type live into HUD while holding (experimental)
+        Live HUD preview while holding (experimental)
       </label>
       <div class="field">
         <label for="liveEng">Live streaming engine</label>

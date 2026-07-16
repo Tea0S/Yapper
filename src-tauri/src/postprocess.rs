@@ -144,34 +144,77 @@ fn collapse_comma_runs(s: &str) -> String {
     out
 }
 
-/// Collapse whitespace after `"` when starting quoted words; keep `" .` / `" !` / `" ?` intact
-/// (spoken punctuation commands — space between `"` and mark).
-fn tighten_ascii_open_quote_spacing(s: &str) -> String {
+/// Normalize ASCII `"` spacing with open/close parity.
+/// Opening: `end."Word` / `said " hi` → `end. "Word` / `said "hi` (space before, not after).
+/// Closing: `word "` → `word"`. Digit+`"` (inches) is left alone and does not toggle parity.
+fn normalize_ascii_quote_spacing(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
+    let mut open = false;
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '"' {
+        if chars[i] != '"' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        // Feet/inches: `6"` — not a dialogue quote.
+        if out.chars().last().is_some_and(|c| c.is_ascii_digit()) {
+            out.push('"');
+            i += 1;
+            continue;
+        }
+
+        if !open {
+            while out.ends_with(|c: char| c.is_whitespace()) {
+                out.pop();
+            }
+            if let Some(prev) = out.chars().last() {
+                // Space before opening quote after a sentence end or word (`said "`).
+                // Stay flush after opening brackets / dashes.
+                if !matches!(prev, '(' | '[' | '{' | '/' | '—' | '–') {
+                    out.push(' ');
+                }
+            }
+            out.push('"');
             let mut j = i + 1;
             while j < chars.len() && chars[j].is_whitespace() {
                 j += 1;
             }
-            if j < chars.len() && matches!(chars[j], '.' | '!' | '?') {
-                out.push('"');
-                if j > i + 1 {
-                    out.push(' ');
-                }
+            // Keep `" . word"` (spoken period after open quotes); otherwise glue `"word`.
+            if j < chars.len() && matches!(chars[j], '.' | '!' | '?') && j > i + 1 {
+                out.push(' ');
                 i = j;
-                continue;
+            } else {
+                i = j;
+            }
+            open = true;
+        } else {
+            while out.ends_with(|c: char| c.is_whitespace()) {
+                out.pop();
             }
             out.push('"');
-            i = j;
-            continue;
+            i += 1;
+            open = false;
         }
-        out.push(chars[i]);
-        i += 1;
     }
     out
+}
+
+/// `she` / `He` / `Vivian` look like dialogue tags; `and` / `walking` are sentence continuations.
+fn quote_followon_is_dialogue_tag(word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let lower = word.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "he" | "she" | "i" | "we" | "they" | "it" | "someone" | "somebody"
+    ) || word
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_uppercase())
 }
 
 /// Whisper often emits `.` right after `"` when the user pauses during “open quotes”.
@@ -209,8 +252,8 @@ fn normalize_after_spoken_punct(s: &str) -> String {
         return out;
     };
     out = re_sent.replace_all(&out, "$1$2 ").into_owned();
-    // Do not anchor on comma: `, ,` would match `(\S)\s+,\s*` with \S = comma and corrupt the text.
-    let Ok(re_comma) = Regex::new(r"([^\s,])\s+,\s*") else {
+    // Do not anchor on comma or quote: `, ,` / `" ,` would glue wrongly (`",` before repair).
+    let Ok(re_comma) = Regex::new(r#"([^\s,\"])\s+,\s*"#) else {
         return out;
     };
     out = re_comma.replace_all(&out, "$1, ").into_owned();
@@ -222,12 +265,8 @@ fn normalize_after_spoken_punct(s: &str) -> String {
         return out;
     };
     out = re_colon.replace_all(&out, "$1: ").into_owned();
-    // Tighten `" word"` → `"word"`, but keep `" . word"` (spoken punctuation).
-    out = tighten_ascii_open_quote_spacing(&out);
-    let Ok(re_quote_close) = Regex::new(r#"\s+""#) else {
-        return out;
-    };
-    out = re_quote_close.replace_all(&out, "\"").into_owned();
+    // Opening: space before (`. "Word`); closing: no space before (`word"`).
+    out = normalize_ascii_quote_spacing(&out);
     let Ok(re_spaces) = Regex::new(r"[ \t\f\v]{2,}") else {
         return out;
     };
@@ -317,11 +356,23 @@ pub(crate) fn repair_asr_punctuation(s: &str) -> String {
         out = re.replace_all(&out, "${1}\" ${2}").into_owned();
     }
     // Pause after spoken "close quotes": ASR often puts comma/period *outside* the closing mark.
-    // `Hi" , she` → `Hi," she`. `\D` before `"` skips `6" ,` (inches).
-    if let Ok(re) = Regex::new(r#"(\D)"\s+,\s+"#) {
-        out = re.replace_all(&out, "${1},\" ").into_owned();
+    // Dialogue tags (`"Hi" , she` / `"Hi", She`) → comma inside (`"Hi," she`).
+    // Sentence continuation (`"Hi", and` / `"Hi", walking`) → drop the stray comma.
+    // Skip when the char before the quote is a digit (`6" ,` inches).
+    if let Ok(re) = Regex::new(r#"([^0-9\s])\s*"\s*,\s+([A-Za-z][A-Za-z']*)"#) {
+        out = re
+            .replace_all(&out, |caps: &Captures| {
+                let before = caps.get(1).unwrap().as_str();
+                let word = caps.get(2).unwrap().as_str();
+                if quote_followon_is_dialogue_tag(word) {
+                    format!("{before},\" {word}")
+                } else {
+                    format!("{before}\" {word}")
+                }
+            })
+            .into_owned();
     }
-    if let Ok(re) = Regex::new(r#"(\D)"\s+\.\s+([A-Za-z])"#) {
+    if let Ok(re) = Regex::new(r#"([^0-9\s])\s*"\s+\.\s+([A-Za-z])"#) {
         out = re.replace_all(&out, "${1}\" ${2}").into_owned();
     }
     if let Ok(re) = Regex::new(r"[ \t\f\v]{2,}") {
@@ -527,9 +578,10 @@ rules:
 
     #[test]
     fn repair_double_comma_after_quote() {
+        // Collapse `,,` then place the dialogue comma inside the closing quote.
         assert_eq!(
             repair_asr_punctuation(r#""Hi",, she said"#),
-            r#""Hi", she said"#
+            r#""Hi," she said"#
         );
     }
 
@@ -568,16 +620,45 @@ rules:
             repair_asr_punctuation(r#"about 6" , wide"#),
             r#"about 6" , wide"#
         );
+        // ASR pause comma while continuing the sentence — drop it (don't leave `",`).
+        assert_eq!(
+            repair_asr_punctuation(r#"He said "hello", and left"#),
+            r#"He said "hello" and left"#
+        );
+        assert_eq!(
+            repair_asr_punctuation(r#"He said "hello" , walking on"#),
+            r#"He said "hello" walking on"#
+        );
     }
 
     #[test]
     fn apply_spoken_close_quotes_then_comma_phrase() {
         let o = apply_spoken_punctuation(r#"word close quotes comma she said"#);
         assert!(
-            o.contains("\"she") || o.contains(", she"),
-            "unexpected output: {o:?}"
+            o.contains(",\" she") || o.contains(",\"she"),
+            "expected dialogue comma inside closing quote: {o:?}"
         );
         assert!(!o.contains("\" ,"), "comma should not float outside quotes: {o:?}");
+        assert!(!o.contains("\","), "comma should not sit after closing quote: {o:?}");
+    }
+
+    #[test]
+    fn spoken_open_quote_after_period_keeps_leading_space() {
+        let o = apply_spoken_punctuation(
+            "That was the end period open quote Hello there close quote",
+        );
+        assert!(
+            o.contains(". \""),
+            "expected space between sentence end and opening quote: {o:?}"
+        );
+        assert!(
+            !o.contains(".\""),
+            "opening quote must not glue to the period: {o:?}"
+        );
+        assert!(
+            o.contains("\"Hello") || o.contains("\"hello"),
+            "quoted text should follow the opening quote without a leading space: {o:?}"
+        );
     }
 
     #[test]
