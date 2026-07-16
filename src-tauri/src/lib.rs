@@ -430,6 +430,7 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
 }
 
 /// Tear down the live streaming session. Discarded text — paste uses batch ASR.
+/// Must not block PTT release: waiting on stream_final previously hung the HUD for up to 30s.
 async fn end_live_stream(app: &tauri::AppHandle, state: &AppState) {
     let conn = match open_db(app) {
         Ok(c) => c,
@@ -438,26 +439,29 @@ async fn end_live_stream(app: &tauri::AppHandle, state: &AppState) {
     if !live_preview_wanted(&conn) {
         return;
     }
-    let session_id = state.live_stream_session_id.load(Ordering::SeqCst);
+    let session_id = state.live_stream_session_id.swap(0, Ordering::SeqCst);
     if session_id == 0 {
         return;
     }
     let engine = live_streaming_engine(&conn);
-    let _guard = state.inference_io_lock.lock().await;
-    if send_sidecar_msg(
-        state,
-        SidecarIn::EndStream {
-            session_id,
-            engine,
-        },
-    )
-    .await
-    .is_err()
     {
-        return;
+        let _guard = state.inference_io_lock.lock().await;
+        let _ = send_sidecar_msg(
+            state,
+            SidecarIn::EndStream {
+                session_id,
+                engine,
+            },
+        )
+        .await;
     }
-    if let Err(e) = wait_stream_final(state, session_id).await {
-        ptt_log(format!("live_dictation: stream final (ignored): {e}"));
+    // Brief drain only — never stall the batch Whisper commit / paste path.
+    match tokio::time::timeout(Duration::from_millis(750), wait_stream_final(state, session_id))
+        .await
+    {
+        Ok(Err(e)) => ptt_log(format!("live_dictation: stream final (ignored): {e}")),
+        Err(_) => ptt_log("live_dictation: stream final drain timed out (ok, preview-only)"),
+        Ok(Ok(_)) => {}
     }
 }
 

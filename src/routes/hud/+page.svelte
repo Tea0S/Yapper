@@ -14,6 +14,7 @@
   let isMacChrome = $state(false);
   let pttHint = $state("Push-to-talk");
   let toggleMicHint = $state("");
+  let previewEl = $state<HTMLParagraphElement | null>(null);
 
   const dotCount = 9;
   const DRAG_THRESHOLD_PX = 6;
@@ -24,6 +25,16 @@
   let dragStarted = false;
 
   const expanded = $derived(phase === "listening" || phase === "transcribing");
+
+  // Keep the newest words visible as the transcript grows past the pill height.
+  $effect(() => {
+    const text = preview;
+    const el = previewEl;
+    if (!el || !text) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  });
 
   function dotLevel(i: number): number {
     const center = (dotCount - 1) / 2;
@@ -176,7 +187,7 @@
               {/each}
             </div>
             {#if phase === "listening" && preview.trim()}
-              <p class="live-preview" aria-live="polite">{preview}</p>
+              <p class="live-preview" bind:this={previewEl} aria-live="polite">{preview}</p>
             {/if}
           </div>
         {:else}
@@ -377,15 +388,22 @@
 
   .live-preview {
     margin: 0;
-    padding: 0 4px 2px;
-    font-size: 11px;
+    padding: 0 6px 2px;
+    font-size: 12px;
     line-height: 1.35;
     font-weight: 500;
     color: rgba(248, 250, 252, 0.92);
-    text-align: center;
+    text-align: left;
     word-wrap: break-word;
-    max-height: 4.2em;
-    overflow: hidden;
+    overflow-wrap: anywhere;
+    max-height: 5.6em;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+
+  .live-preview::-webkit-scrollbar {
+    display: none;
   }
 
   .pill.macos .dots {

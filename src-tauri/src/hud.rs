@@ -15,10 +15,8 @@ pub(crate) fn widget_enabled(app: &AppHandle) -> Result<bool, String> {
 
 /// Collapsed “always there” capsule — height includes space above the pill for the hover tooltip.
 const SIZE_COLLAPSED: (f64, f64) = (112.0, 168.0);
-/// Extra width when the meter is active (logical px).
-const EXPAND_DELTA_W: f64 = 40.0;
-/// Wider and taller while dictating so live preview text fits under the meter.
-const SIZE_EXPANDED: (f64, f64) = (SIZE_COLLAPSED.0 + EXPAND_DELTA_W, 248.0);
+/// Wide enough for a readable live transcript tail while dictating.
+const SIZE_EXPANDED: (f64, f64) = (420.0, 268.0);
 
 fn hud_url(app: &AppHandle) -> Result<Url, String> {
     let main = app
