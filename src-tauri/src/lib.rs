@@ -218,16 +218,22 @@ async fn wait_stream_final(state: &AppState, session_id: u64) -> Result<String, 
     }
 }
 
-async fn update_live_hud_preview(state: &AppState, raw: String) {
+async fn update_live_hud_preview(app: &tauri::AppHandle, state: &AppState, raw: String) {
     let t = raw.trim().to_string();
     if t.is_empty() {
         return;
     }
     let mut g = state.live_hud_preview.lock().await;
+    let first_preview = g.is_empty();
     if *g != t {
         *g = t.clone();
     }
     *state.live_last_partial_text.lock().await = t;
+    drop(g);
+    // Grow the pill only once live text actually arrives (not for every PTT).
+    if first_preview {
+        let _ = hud::set_layout(app, hud::HudLayout::Preview);
+    }
 }
 
 async fn abort_live_preview_task(state: &AppState) {
@@ -423,7 +429,7 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
             }
         } {
             if !text.trim().is_empty() && !is_final {
-                update_live_hud_preview(&state, text).await;
+                update_live_hud_preview(&app, &state, text).await;
             }
         }
     }
@@ -1267,10 +1273,10 @@ pub(crate) async fn ptt_start_inner(app: &tauri::AppHandle, state: &AppState) ->
         let mut g = state.hud_phase.lock().map_err(|e| e.to_string())?;
         *g = HudPhase::Listening;
     }
-    if hud::set_expanded(app, true).is_err() {
+    if hud::set_layout(app, hud::HudLayout::Listening).is_err() {
         let _ = hud::ensure_collapsed_visible(app);
     }
-    if let Err(e) = hud::set_expanded(app, true) {
+    if let Err(e) = hud::set_layout(app, hud::HudLayout::Listening) {
         if let Ok(mut g) = state.hud_phase.lock() {
             *g = HudPhase::Idle;
         }

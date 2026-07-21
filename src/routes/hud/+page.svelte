@@ -14,10 +14,11 @@
   let isMacChrome = $state(false);
   let pttHint = $state("Push-to-talk");
   let toggleMicHint = $state("");
-  let previewEl = $state<HTMLParagraphElement | null>(null);
 
   const dotCount = 9;
   const DRAG_THRESHOLD_PX = 6;
+  /** Single-line ticker: show the newest words, not a scrolling paragraph. */
+  const PREVIEW_TAIL_CHARS = 42;
 
   let pointerDown = false;
   let pointerStartX = 0;
@@ -25,16 +26,15 @@
   let dragStarted = false;
 
   const expanded = $derived(phase === "listening" || phase === "transcribing");
+  const hasPreview = $derived(phase === "listening" && preview.trim().length > 0);
+  const previewTail = $derived(formatPreviewTail(preview, PREVIEW_TAIL_CHARS));
 
-  // Keep the newest words visible as the transcript grows past the pill height.
-  $effect(() => {
-    const text = preview;
-    const el = previewEl;
-    if (!el || !text) return;
-    requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight;
-    });
-  });
+  function formatPreviewTail(raw: string, maxChars: number): string {
+    const t = raw.replace(/\s+/g, " ").trim();
+    if (!t) return "";
+    if (t.length <= maxChars) return t;
+    return "…" + t.slice(-(maxChars - 1));
+  }
 
   function dotLevel(i: number): number {
     const center = (dotCount - 1) / 2;
@@ -167,6 +167,7 @@
         type="button"
         class="pill"
         class:expanded
+        class:previewing={hasPreview}
         class:macos={isMacChrome}
         aria-label="Open Yapper — or drag to move"
         onpointerdown={onPillPointerDown}
@@ -186,8 +187,8 @@
                 ></span>
               {/each}
             </div>
-            {#if phase === "listening" && preview.trim()}
-              <p class="live-preview" bind:this={previewEl} aria-live="polite">{preview}</p>
+            {#if hasPreview}
+              <p class="live-preview" aria-live="polite">{previewTail}</p>
             {/if}
           </div>
         {:else}
@@ -228,7 +229,7 @@
   .hud-shell {
     display: flex;
     flex-direction: column;
-    align-items: stretch;
+    align-items: center;
     width: 100%;
     max-width: 100%;
   }
@@ -333,14 +334,21 @@
     cursor: grabbing;
   }
 
-  /* Width tracks Rust logical window (collapsed + expanded). */
+  /* Meter-only: stay compact, centered in the window. */
   .pill.expanded {
+    width: auto;
+    max-width: 100%;
+    min-width: 88px;
+    min-height: 36px;
+    padding: 8px 16px;
+  }
+
+  /* Live ticker: fill the slightly larger preview window. */
+  .pill.expanded.previewing {
     align-self: stretch;
     width: 100%;
-    max-width: 100%;
     min-width: 0;
-    min-height: 36px;
-    padding: 8px 10px;
+    padding: 8px 12px;
   }
 
   /* macOS: same footprint as other platforms; local glass via backdrop-filter (no full-window vibrancy). */
@@ -382,28 +390,24 @@
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    gap: 6px;
+    gap: 5px;
     width: 100%;
+    min-width: 0;
   }
 
+  /* Trailing one-liner — newest speech stays visible without scrolling. */
   .live-preview {
     margin: 0;
-    padding: 0 6px 2px;
-    font-size: 12px;
-    line-height: 1.35;
+    padding: 0 2px;
+    font-size: 11px;
+    line-height: 1.25;
     font-weight: 500;
     color: rgba(248, 250, 252, 0.92);
-    text-align: left;
-    word-wrap: break-word;
-    overflow-wrap: anywhere;
-    max-height: 5.6em;
-    overflow-x: hidden;
-    overflow-y: auto;
-    scrollbar-width: none;
-  }
-
-  .live-preview::-webkit-scrollbar {
-    display: none;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: clip;
+    max-width: 100%;
   }
 
   .pill.macos .dots {

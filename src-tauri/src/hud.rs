@@ -15,8 +15,17 @@ pub(crate) fn widget_enabled(app: &AppHandle) -> Result<bool, String> {
 
 /// Collapsed “always there” capsule — height includes space above the pill for the hover tooltip.
 const SIZE_COLLAPSED: (f64, f64) = (112.0, 168.0);
-/// Wide enough for a readable live transcript tail while dictating.
-const SIZE_EXPANDED: (f64, f64) = (420.0, 268.0);
+/// PTT / transcribing with meter only — slight bump so the dots breathe, not a giant bar.
+const SIZE_LISTENING: (f64, f64) = (152.0, 200.0);
+/// Live preview line under the meter — a bit wider and taller, still compact.
+const SIZE_PREVIEW: (f64, f64) = (228.0, 236.0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HudLayout {
+    Collapsed,
+    Listening,
+    Preview,
+}
 
 fn hud_url(app: &AppHandle) -> Result<Url, String> {
     let main = app
@@ -102,17 +111,17 @@ pub fn ensure_collapsed_visible(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn set_expanded(app: &AppHandle, expanded: bool) -> Result<(), String> {
+pub fn set_layout(app: &AppHandle, layout: HudLayout) -> Result<(), String> {
     if !widget_enabled(app)? {
         return Ok(());
     }
     let w = app
         .get_webview_window(LABEL)
         .ok_or_else(|| "hud window missing".to_string())?;
-    let (lw, lh) = if expanded {
-        SIZE_EXPANDED
-    } else {
-        SIZE_COLLAPSED
+    let (lw, lh) = match layout {
+        HudLayout::Collapsed => SIZE_COLLAPSED,
+        HudLayout::Listening => SIZE_LISTENING,
+        HudLayout::Preview => SIZE_PREVIEW,
     };
     set_logical_size_keep_hcenter(&w, lw, lh)?;
     Ok(())
@@ -143,6 +152,6 @@ impl Drop for HudCollapseAfterPtt {
         if let Ok(mut g) = state.hud_phase.lock() {
             *g = HudPhase::Idle;
         }
-        let _ = set_expanded(&self.app, false);
+        let _ = set_layout(&self.app, HudLayout::Collapsed);
     }
 }
