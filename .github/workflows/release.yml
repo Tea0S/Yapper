@@ -1,7 +1,15 @@
 # Push to main (when package.json version has no matching tag yet) OR push tag v*
 # → build Windows + macOS installers, merge updater manifest, publish GitHub Release.
-# Requires repo secret: TAURI_SIGNING_PRIVATE_KEY (full minisign private key text).
-# Optional later: add Apple Developer ID signing + notarization on the macOS job (cert + notarytool env).
+#
+# Required repo secret:
+#   TAURI_SIGNING_PRIVATE_KEY — minisign private key (updater artifacts)
+#
+# Optional Apple secrets (Developer ID + notarization). Without them, Mac DMGs still
+# build but Gatekeeper may show “damaged” after download — clear quarantine with
+# `xattr -cr /Applications/Yapper.app` (see README).
+#   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+#   APPLE_API_KEY, APPLE_API_ISSUER, APPLE_API_KEY_PATH_CONTENT
+#   APPLE_SIGNING_IDENTITY (optional override)
 #
 # Workflow: bump version in package.json / Cargo.toml / tauri.conf.json, merge to main.
 # CI creates tag v{version} and publishes the release. Subsequent main commits skip until the next bump.
@@ -138,6 +146,41 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
+      - name: Optional Apple signing + notarization
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH_CONTENT: ${{ secrets.APPLE_API_KEY_PATH_CONTENT }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "${APPLE_CERTIFICATE}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD}" ] \
+            || [ -z "${APPLE_API_KEY}" ] || [ -z "${APPLE_API_ISSUER}" ] \
+            || [ -z "${APPLE_API_KEY_PATH_CONTENT}" ]; then
+            echo "::warning::Apple signing secrets not set — building unsigned Mac DMG."
+            echo "Gatekeeper may report the app as damaged after download; clear quarantine:"
+            echo "  xattr -cr /Applications/Yapper.app"
+            exit 0
+          fi
+          KEY_DIR="${RUNNER_TEMP}/private_keys"
+          mkdir -p "$KEY_DIR"
+          KEY_PATH="${KEY_DIR}/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s\n' "$APPLE_API_KEY_PATH_CONTENT" > "$KEY_PATH"
+          {
+            echo "APPLE_CERTIFICATE<<EOF"
+            echo "$APPLE_CERTIFICATE"
+            echo "EOF"
+            echo "APPLE_CERTIFICATE_PASSWORD=${APPLE_CERTIFICATE_PASSWORD}"
+            echo "APPLE_API_KEY=${APPLE_API_KEY}"
+            echo "APPLE_API_ISSUER=${APPLE_API_ISSUER}"
+            echo "APPLE_API_KEY_PATH=${KEY_PATH}"
+          } >> "$GITHUB_ENV"
+          if [ -n "${APPLE_SIGNING_IDENTITY}" ]; then
+            echo "APPLE_SIGNING_IDENTITY=${APPLE_SIGNING_IDENTITY}" >> "$GITHUB_ENV"
+          fi
+          echo "Apple signing + notarization env configured."
+
       - name: Write minisign key
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -158,7 +201,7 @@ jobs:
 
       - run: npm ci
 
-      - name: Pack release (Python + signed Tauri bundle)
+      - name: Pack release (Python + Tauri bundle)
         run: bash scripts/pack-with-updater-signing.sh --release
 
       - name: Write platforms partial (Darwin)

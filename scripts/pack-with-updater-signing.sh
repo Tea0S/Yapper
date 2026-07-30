@@ -2,6 +2,11 @@
 # Loads minisign private key into TAURI_SIGNING_PRIVATE_KEY and enables createUpdaterArtifacts
 # via config merge (see src-tauri/tauri.updater-release.conf.json).
 #
+# For Gatekeeper-safe .dmg/.app on CI or a Mac with a Developer ID cert, also export:
+#   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD (or a keychain signing identity)
+#   APPLE_API_KEY / APPLE_API_ISSUER / APPLE_API_KEY_PATH  (notarization)
+# See https://v2.tauri.app/distribute/sign/macos/
+#
 # Usage (repo root):
 #   bash scripts/pack-with-updater-signing.sh           -> npx tauri build (signed updater artifacts)
 #   bash scripts/pack-with-updater-signing.sh --release -> npm run bundle:python:mac + tauri build

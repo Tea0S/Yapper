@@ -121,6 +121,16 @@ npm run tauri build
 
 For day-to-day dev you can still use a project venv and `YAPPER_PYTHON` instead of running this script every time.
 
+### macOS Gatekeeper (“damaged” DMG)
+
+Unsigned DMGs from GitHub often trigger **“Yapper is damaged and can’t be opened.”** That’s Gatekeeper quarantine, not a corrupt file. After dragging the app to Applications:
+
+```bash
+xattr -cr /Applications/Yapper.app
+```
+
+Optional Apple Developer ID signing + notarization is wired in CI when these secrets exist: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_PATH_CONTENT` (and optionally `APPLE_SIGNING_IDENTITY`). See [Tauri macOS signing](https://v2.tauri.app/distribute/sign/macos/). Without them, releases still build; use `xattr` above.
+
 ### Updater signing (optional)
 
 Plain `npm run tauri build` does **not** produce signed updater artifacts and does **not** need `TAURI_SIGNING_PRIVATE_KEY`. To build with `createUpdaterArtifacts` (e.g. for GitHub releases), place the minisign secret at `src-tauri/.tauri/updater.key` (gitignored), then:
