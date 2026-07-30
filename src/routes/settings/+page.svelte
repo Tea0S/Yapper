@@ -1196,12 +1196,23 @@
           <option value="ja">Japanese</option>
           <option value="zh">Chinese</option>
         </select>
-        <p class="field-hint">Leave on Auto unless the wrong language keeps appearing.</p>
+        <p class="field-hint">
+          Prefer a fixed language for dictation (e.g. English). Auto-detect on short clips can
+          flip style and drop punctuation.
+        </p>
       </div>
       <div class="field">
         <label for="wprompt">Vocabulary hint (optional)</label>
-        <textarea id="wprompt" rows="2" bind:value={whisperInitialPrompt} placeholder="e.g. medical terms, names"></textarea>
-        <p class="field-hint">Short phrases nudge word choice; long text hurts quality.</p>
+        <textarea
+          id="wprompt"
+          rows="2"
+          bind:value={whisperInitialPrompt}
+          placeholder={'e.g. Names: Kane, Vivian. Terms: "myocardial infarction".'}
+        ></textarea>
+        <p class="field-hint">
+          Whisper copies this text’s style. Include capitals and sentence punctuation (periods),
+          or punctuation may vanish for the whole run. Bare word lists are the usual cause.
+        </p>
       </div>
       <label class="check">
         <input type="checkbox" bind:checked={whisperConditionOnPrevious} />

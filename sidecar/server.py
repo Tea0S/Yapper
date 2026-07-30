@@ -534,6 +534,21 @@ def _w_bool(w: dict[str, Any], key: str, default: bool) -> bool:
     return default
 
 
+# Whisper copies the *style* of initial_prompt. Empty prompts — or vocab lists with no
+# sentence punctuation — often lock the whole decode into no-punct / no-caps mode
+# (especially large-v3-turbo on short PTT clips). Always seed a punctuated style anchor.
+_DEFAULT_PUNCT_STYLE_PROMPT = "Hello, welcome. This is clear, punctuated English."
+
+
+def _punct_style_initial_prompt(user_prompt: str) -> str:
+    user = (user_prompt or "").strip()
+    if not user:
+        return _DEFAULT_PUNCT_STYLE_PROMPT
+    if not any(c in user for c in ".?!"):
+        return f"{user}. {_DEFAULT_PUNCT_STYLE_PROMPT}"
+    return user
+
+
 def build_transcribe_kwargs(*, for_file: bool) -> dict[str, Any]:
     """Merge init `whisper` dict with sane defaults (PCM vs file VAD differ)."""
     w: dict[str, Any] = CONFIG.get("whisper") or {}
@@ -546,7 +561,7 @@ def build_transcribe_kwargs(*, for_file: bool) -> dict[str, Any]:
     initial_prompt = w.get("initial_prompt")
     if not isinstance(initial_prompt, str):
         initial_prompt = ""
-    initial_prompt = initial_prompt.strip()
+    initial_prompt = _punct_style_initial_prompt(initial_prompt)
 
     vad_filter = (
         _w_bool(w, "vad_filter_file", True)
@@ -565,9 +580,11 @@ def build_transcribe_kwargs(*, for_file: bool) -> dict[str, Any]:
         log_prob_threshold=_w_float(w, "log_prob_threshold", -0.55),
         compression_ratio_threshold=_w_float(w, "compression_ratio_threshold", 1.9),
         condition_on_previous_text=_w_bool(w, "condition_on_previous_text", False),
+        initial_prompt=initial_prompt,
+        # Timestamp decoding correlates with Whisper's "no punctuation" mode; dictation
+        # only needs text. (MLX path already sets without_timestamps for PCM.)
+        word_timestamps=False,
     )
-    if initial_prompt:
-        kw["initial_prompt"] = initial_prompt
     return kw
 
 
@@ -670,6 +687,11 @@ def transcribe_pcm_i16(pcm: bytes, sample_rate: int) -> tuple[str, float]:
     )
     t0 = time.perf_counter()
     transcribe_kw = build_transcribe_kwargs(for_file=False)
+    vlog(
+        f"transcribe_pcm: initial_prompt={transcribe_kw.get('initial_prompt')!r} "
+        f"language={transcribe_kw.get('language')!r} "
+        f"condition_on_previous_text={transcribe_kw.get('condition_on_previous_text')!r}"
+    )
     hst = _w_float(CONFIG.get("whisper") or {}, "hallucination_silence_threshold", 1.6)
     # Newer faster-whisper: suppress long-silence hallucinations inside a segment.
     try:
