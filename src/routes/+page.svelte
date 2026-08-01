@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
 
   type EngineState = {
@@ -79,6 +80,39 @@
       instanceRole = r === "network_server" ? "network_server" : "dictation";
       await refreshNodeQuick();
     })();
+    const unsubs: Array<() => void> = [];
+    void listen<{ message?: string; recovering?: boolean }>("engine-crashed", async (ev) => {
+      try {
+        engine = await invoke<EngineState>("engine_status");
+      } catch {
+        engine = { ready: false, mode: "none", message: "Could not read engine status." };
+      }
+      const msg = ev.payload?.message ?? "Inference engine exited.";
+      lastError = ev.payload?.recovering
+        ? `${msg} Restarting automatically…`
+        : msg;
+    }).then((u) => unsubs.push(u));
+    void listen<{ attempt?: number }>("engine-auto-restart", async () => {
+      try {
+        const next = await invoke<EngineState>("engine_start");
+        engine = next;
+        lastError = null;
+      } catch (e) {
+        lastError = String(e);
+      }
+    }).then((u) => unsubs.push(u));
+    void listen<{ message?: string }>("engine-recovered", async (ev) => {
+      lastError = null;
+      try {
+        engine = await invoke<EngineState>("engine_status");
+      } catch {
+        engine = {
+          ready: true,
+          mode: "local",
+          message: ev.payload?.message ?? "Inference engine restarted.",
+        };
+      }
+    }).then((u) => unsubs.push(u));
     const id = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       invoke<MicLevel>("get_mic_input_level")
@@ -99,6 +133,7 @@
     return () => {
       clearInterval(id);
       clearInterval(nodePoll);
+      for (const u of unsubs) u();
     };
   });
 

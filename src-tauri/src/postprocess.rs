@@ -11,12 +11,21 @@ fn spoken_punct_rules() -> &'static [(Regex, &'static str)] {
             ("question mark", "?"),
             ("inverted question mark", "¿"),
             ("inverted exclamation mark", "¡"),
+            ("open double quotes", "\""),
+            ("close double quotes", "\""),
+            ("open double quote", "\""),
+            ("close double quote", "\""),
             ("open quotes", "\""),
             ("close quotes", "\""),
             ("open quote", "\""),
             ("close quote", "\""),
             ("begin quote", "\""),
             ("end quote", "\""),
+            ("double quote", "\""),
+            ("open single quote", "'"),
+            ("close single quote", "'"),
+            ("single quote", "'"),
+            ("apostrophe", "'"),
             ("new paragraph", "\n\n"),
             ("new line", "\n\n"),
             // Whisper often prints this as one word or hyphenated.
@@ -24,9 +33,12 @@ fn spoken_punct_rules() -> &'static [(Regex, &'static str)] {
             ("new-line", "\n\n"),
             ("newline", "\n\n"),
             ("full stop", "."),
+            ("full-stop", "."),
+            ("fullstop", "."),
             ("semicolon", ";"),
             ("ellipsis", "…"),
             ("dot dot dot", "…"),
+            ("period period", "…"),
             ("em dash", "—"),
             ("en dash", "–"),
             ("open parenthesis", "("),
@@ -63,6 +75,7 @@ fn spoken_punct_rules() -> &'static [(Regex, &'static str)] {
             ("caret", "^"),
             ("period", "."),
             ("comma", ","),
+            ("coma", ","), // common ASR mishear of "comma"
             ("colon", ":"),
             ("hyphen", "-"),
         ];
@@ -76,6 +89,40 @@ fn spoken_punct_rules() -> &'static [(Regex, &'static str)] {
             .collect()
     });
     RULES.as_slice()
+}
+
+/// Bare "dot" → `.` only when not glued into emails/URLs/filenames.
+fn apply_safe_dot_command(s: &str) -> String {
+    static RE: LazyLock<Option<Regex>> =
+        LazyLock::new(|| Regex::new(r"(?i)\bdot\b").ok());
+    let Some(re) = RE.as_ref() else {
+        return s.to_string();
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for m in re.find_iter(s) {
+        let start = m.start();
+        let end = m.end();
+        let before_ok = start == 0
+            || !s[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '@' | '_'));
+        let after_ok = end >= s.len()
+            || !s[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '@' | '_'));
+        out.push_str(&s[last..start]);
+        if before_ok && after_ok {
+            out.push('.');
+        } else {
+            out.push_str(m.as_str());
+        }
+        last = end;
+    }
+    out.push_str(&s[last..]);
+    out
 }
 
 /// Private-use characters interpreted by `paste.rs` as key clicks (not pasted as text).
@@ -121,11 +168,87 @@ pub fn apply_spoken_punctuation(text: &str) -> String {
     for (re, rep) in spoken_punct_rules() {
         s = re.replace_all(&s, *rep).into_owned();
     }
+    s = apply_safe_dot_command(&s);
     s = normalize_after_spoken_punct(&s);
     for (re, rep) in spoken_key_rules() {
         s = re.replace_all(&s, *rep).into_owned();
     }
     repair_asr_punctuation(&s)
+}
+
+/// Uppercase the first letter of the utterance and after `.?!` / paragraph breaks.
+/// Skips private-use key sentinels. Does not force-cap already-uppercase letters.
+pub fn capitalize_sentences(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut capitalize_next = true;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Private-use key sentinels — pass through, keep capitalize state.
+        if ('\u{E090}'..='\u{E094}').contains(&c) {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '\n' {
+            out.push(c);
+            // Paragraph / line break starts a new sentence.
+            if i + 1 < chars.len() && chars[i + 1] == '\n' {
+                capitalize_next = true;
+            } else {
+                capitalize_next = true;
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(c, '.' | '?' | '!') {
+            out.push(c);
+            capitalize_next = true;
+            i += 1;
+            continue;
+        }
+        if c.is_whitespace() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // Opening quote / paren before the sentence word: keep and capitalize after.
+        if matches!(c, '"' | '\'' | '(' | '[' | '{' | '¿' | '¡') && capitalize_next {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if capitalize_next && c.is_alphabetic() {
+            for u in c.to_uppercase() {
+                out.push(u);
+            }
+            capitalize_next = false;
+            i += 1;
+            continue;
+        }
+        if c.is_alphabetic() || c.is_ascii_digit() {
+            capitalize_next = false;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// True when multi-word text has almost no sentence terminators (Whisper no-punct mode).
+pub fn looks_underpunctuated(text: &str) -> bool {
+    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
+    if letters < 12 {
+        return false;
+    }
+    let words = text.split_whitespace().filter(|w| !w.is_empty()).count();
+    if words < 4 {
+        return false;
+    }
+    let terminators = text.chars().filter(|c| matches!(c, '.' | '?' | '!' | '…')).count();
+    // Fewer than one terminator per ~28 letters, or zero on a longer phrase.
+    terminators == 0 || (letters as f32 / terminators.max(1) as f32) > 28.0
 }
 
 /// Collapse `,,`, `, ,`, etc. (Whisper comma + spoken "comma", or ASR stutter).
@@ -462,6 +585,31 @@ pub fn pipeline(
     s = apply_spoken_punctuation(&s);
     s = apply_corrections(&s, corrections);
     s = apply_dictionary(&s, dictionary);
+    s = capitalize_sentences(&s);
+    s = apply_tone(&s, tone_preset, tone_dir);
+    s
+}
+
+/// Spoken punct + corrections + dictionary (before optional grammar restore).
+pub fn pipeline_before_restore(
+    text: &str,
+    corrections: &[(String, String, i64)],
+    dictionary: &[(String, String, String, i64)],
+) -> String {
+    let mut s = text.to_string();
+    s = apply_spoken_punctuation(&s);
+    s = apply_corrections(&s, corrections);
+    s = apply_dictionary(&s, dictionary);
+    s
+}
+
+/// Capitalize sentences + tone (after optional grammar restore).
+pub fn pipeline_after_restore(
+    text: &str,
+    tone_preset: &str,
+    tone_dir: &std::path::Path,
+) -> String {
+    let mut s = capitalize_sentences(text);
     s = apply_tone(&s, tone_preset, tone_dir);
     s
 }
@@ -512,9 +660,71 @@ rules:
             apply_spoken_punctuation("Hello period how are you comma fine"),
             "Hello. how are you, fine"
         );
+        assert_eq!(
+            capitalize_sentences(&apply_spoken_punctuation(
+                "Hello period how are you comma fine"
+            )),
+            "Hello. How are you, fine"
+        );
         let o = apply_spoken_punctuation("He said open quotes hello close quotes");
         assert!(o.contains('"'));
         assert!(o.contains("hello"));
+    }
+
+    #[test]
+    fn spoken_punct_aliases_and_safe_dot() {
+        assert_eq!(
+            apply_spoken_punctuation("Done fullstop Next"),
+            "Done. Next"
+        );
+        assert_eq!(
+            apply_spoken_punctuation("Done full-stop Next"),
+            "Done. Next"
+        );
+        assert_eq!(
+            apply_spoken_punctuation("list coma item"),
+            "list, item"
+        );
+        assert_eq!(
+            apply_spoken_punctuation("wait period period more"),
+            "wait … more"
+        );
+        assert_eq!(
+            apply_spoken_punctuation("end dot Next"),
+            "end. Next"
+        );
+        // Do not rewrite "dot" inside email-like tokens (dot between dots).
+        assert_eq!(
+            apply_spoken_punctuation("name.dot.com"),
+            "name.dot.com"
+        );
+        let o = apply_spoken_punctuation("open single quote hi close single quote");
+        assert!(o.contains('\''), "expected single quotes: {o:?}");
+    }
+
+    #[test]
+    fn capitalize_sentences_basic() {
+        assert_eq!(
+            capitalize_sentences("hello. how are you? fine! ok"),
+            "Hello. How are you? Fine! Ok"
+        );
+        assert_eq!(
+            capitalize_sentences("first\n\nsecond"),
+            "First\n\nSecond"
+        );
+        assert_eq!(
+            capitalize_sentences(r#"he said "hello there""#),
+            r#"He said "hello there""#
+        );
+    }
+
+    #[test]
+    fn looks_underpunctuated_heuristic() {
+        assert!(looks_underpunctuated(
+            "hello welcome this is clear punctuated english without any marks"
+        ));
+        assert!(!looks_underpunctuated("Hello, welcome. This is clear."));
+        assert!(!looks_underpunctuated("hi"));
     }
 
     #[test]
@@ -529,6 +739,19 @@ rules:
             let o = apply_spoken_punctuation(&format!("First line {phrase} Second"));
             assert!(o.contains("\n\n"), "expected double newline for {phrase}");
             assert!(o.contains("Second"));
+            let capped = capitalize_sentences(&o);
+            assert!(
+                capped.contains("Second"),
+                "paragraph second sentence present: {capped:?}"
+            );
+            // Space after `\n\n` is fine; next letter must be capitalized.
+            let after_break = capped.split("\n\n").nth(1).unwrap_or("");
+            let first_letter = after_break.chars().find(|c| c.is_alphabetic());
+            assert_eq!(
+                first_letter,
+                Some('S'),
+                "expected capitalize after paragraph for {phrase}: {capped:?}"
+            );
         }
     }
 

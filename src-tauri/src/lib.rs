@@ -24,10 +24,10 @@ use crate::db::{
 };
 use crate::paths::{db_path, model_cache_dir, sidecar_script_path};
 use crate::sidecar::{
-    pop_sidecar_file_done_for_path, pop_sidecar_stream_for_session,
-    pop_sidecar_transcript_for_seq, python_executable, take_file_progress_for_path,
-    take_file_started_for_path, SidecarIn, SidecarOut, SidecarSession, SidecarSpawnEnv,
-    WhisperDecodeOptions,
+    pop_sidecar_file_done_for_path, pop_sidecar_restored_for_seq,
+    pop_sidecar_stream_for_session, pop_sidecar_transcript_for_seq, python_executable,
+    take_file_progress_for_path, take_file_started_for_path, SidecarIn, SidecarOut,
+    SidecarSession, SidecarSpawnEnv, WhisperDecodeOptions,
 };
 use crate::state::{next_seq, AppState, HudPhase};
 use crate::trace_log::ptt_log;
@@ -36,7 +36,7 @@ use audio::{
     vad_segments, AudioInputDevice, InputLevelState,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use postprocess::pipeline;
+use postprocess::{looks_underpunctuated, pipeline, pipeline_after_restore, pipeline_before_restore};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -530,23 +530,87 @@ fn touch_model_activity(state: &AppState) {
     }
 }
 
-fn apply_dictation_postprocess(
+async fn apply_dictation_postprocess(
     app: &tauri::AppHandle,
     state: &AppState,
     mut text: String,
+    underpunctuated: bool,
+    local_sidecar: Option<Arc<SidecarSession>>,
 ) -> Result<String, String> {
-    if !text.is_empty() {
-        let tone = open_db(app)
-            .ok()
-            .and_then(|c| get_setting(&c, "tone_preset").ok().flatten())
-            .unwrap_or_else(|| "standard".into());
-        let conn = open_db(app)?;
-        let corrections =
-            load_corrections_for_postprocess(&conn).map_err(|e| e.to_string())?;
-        let dictionary =
-            load_dictionary_for_postprocess(&conn).map_err(|e| e.to_string())?;
-        text = pipeline(&text, &corrections, &dictionary, &tone, &state.tone_dir);
+    if text.is_empty() {
+        return Ok(text);
     }
+    let tone = open_db(app)
+        .ok()
+        .and_then(|c| get_setting(&c, "tone_preset").ok().flatten())
+        .unwrap_or_else(|| "standard".into());
+    let conn = open_db(app)?;
+    let corrections = load_corrections_for_postprocess(&conn).map_err(|e| e.to_string())?;
+    let dictionary = load_dictionary_for_postprocess(&conn).map_err(|e| e.to_string())?;
+    let grammar_mode = get_setting(&conn, "grammar_restore")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "auto".into())
+        .to_ascii_lowercase();
+
+    text = pipeline_before_restore(&text, &corrections, &dictionary);
+
+    let want_restore = match grammar_mode.as_str() {
+        "off" | "false" | "0" => false,
+        "always" | "on" | "true" | "1" => true,
+        _ => underpunctuated || looks_underpunctuated(&text),
+    };
+
+    if want_restore {
+        let seq = next_seq(&state.seq);
+        let msg = SidecarIn::RestorePunct {
+            seq,
+            text: text.clone(),
+        };
+        ptt_log(format!(
+            "grammar_restore: mode={grammar_mode} underpunctuated={underpunctuated} seq={seq}"
+        ));
+        if let Some(side) = local_sidecar.as_ref() {
+            side.send(&msg).await?;
+            let deadline = Instant::now() + Duration::from_secs(90);
+            loop {
+                if Instant::now() > deadline {
+                    ptt_log("grammar_restore: timed out — keeping pre-restore text");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                match side.pop_restored_for_seq(seq).await? {
+                    Some(restored) => {
+                        text = restored;
+                        break;
+                    }
+                    None => continue,
+                }
+            }
+        } else if let Some(rem) = state.remote.lock().await.as_ref() {
+            rem.tx
+                .send(msg)
+                .map_err(|e| format!("remote restore send: {e}"))?;
+            let deadline = Instant::now() + Duration::from_secs(90);
+            loop {
+                if Instant::now() > deadline {
+                    ptt_log("grammar_restore remote: timed out — keeping pre-restore text");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                let mut q = rem.pending.lock().await;
+                match pop_sidecar_restored_for_seq(&mut q, seq)? {
+                    Some(restored) => {
+                        text = restored;
+                        break;
+                    }
+                    None => continue,
+                }
+            }
+        }
+    }
+
+    text = pipeline_after_restore(&text, &tone, &state.tone_dir);
     Ok(text)
 }
 
@@ -610,6 +674,96 @@ async fn ensure_local_model_loaded(_app: &tauri::AppHandle, state: &AppState) ->
     }
     ptt_log("ensure_model: timed out after 720×500ms");
     Err("Timed out loading Whisper (first use may download several GB from Hugging Face)".into())
+}
+
+
+async fn sidecar_watchdog(app: tauri::AppHandle, run_id: u64) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let state = app.state::<AppState>();
+        if state.idle_run_id.load(Ordering::SeqCst) != run_id {
+            return;
+        }
+        let dead = {
+            let side = state.sidecar.lock().await;
+            match side.as_ref() {
+                Some(s) => !s.is_alive(),
+                None => false,
+            }
+        };
+        if !dead {
+            continue;
+        }
+        ptt_log("sidecar_watchdog: process died — clearing session");
+        *state.sidecar.lock().await = None;
+        state.local_model_in_memory.store(false, Ordering::SeqCst);
+        let _ = app.emit(
+            "engine-crashed",
+            serde_json::json!({
+                "message": "Inference engine exited unexpectedly.",
+                "recovering": true,
+            }),
+        );
+        // Auto-respawn: emit for any open UI; also invoke engine_start from Rust on a
+        // blocking-friendly path so recovery works even when Home isn't mounted.
+        let app_restart = app.clone();
+        let expected_run = run_id;
+        std::thread::spawn(move || {
+            for attempt in 1u32..=3 {
+                std::thread::sleep(Duration::from_millis(800 * attempt as u64));
+                let app_restart = app_restart.clone();
+                let ok = tauri::async_runtime::block_on(async move {
+                    let state = app_restart.state::<AppState>();
+                    if state.idle_run_id.load(Ordering::SeqCst) != expected_run {
+                        return true; // superseded
+                    }
+                    let alive = {
+                        let g = state.sidecar.lock().await;
+                        g.as_ref().is_some_and(|s| s.is_alive())
+                    };
+                    if alive {
+                        return true;
+                    }
+                    ptt_log(format!(
+                        "sidecar_watchdog: auto-restart attempt {attempt}"
+                    ));
+                    let _ = app_restart.emit(
+                        "engine-auto-restart",
+                        serde_json::json!({ "attempt": attempt }),
+                    );
+                    // Call the same command path the UI uses (via AppHandle + State).
+                    drop(state);
+                    match engine_start(app_restart.clone(), app_restart.state()).await {
+                        Ok(st) if st.ready => {
+                            let _ = app_restart.emit(
+                                "engine-recovered",
+                                serde_json::json!({
+                                    "message": "Inference engine restarted automatically."
+                                }),
+                            );
+                            true
+                        }
+                        _ => {
+                            ptt_log("sidecar_watchdog: auto-restart failed");
+                            false
+                        }
+                    }
+                });
+                if ok {
+                    return;
+                }
+            }
+            let _ = app_restart.emit(
+                "engine-crashed",
+                serde_json::json!({
+                    "message": "Inference engine crashed repeatedly — start it again from Home.",
+                    "recovering": false,
+                }),
+            );
+        });
+        // This watchdog exits; a successful engine_start spawns a new one.
+        return;
+    }
 }
 
 async fn model_idle_supervisor(app: tauri::AppHandle, run_id: u64) {
@@ -948,24 +1102,30 @@ fn get_mic_input_level(state: State<'_, AppState>) -> InputLevelState {
 
 #[tauri::command]
 async fn engine_status(state: State<'_, AppState>) -> Result<EngineStatus, String> {
-    let side = state.sidecar.lock().await;
-    let rem = state.remote.lock().await;
     let detail = state.inference_line.lock().await.clone();
-    if side.is_some() {
-        return Ok(EngineStatus {
-            ready: true,
-            mode: "local".into(),
-            message: Some("Sidecar running — use push-to-talk or Transcribe.".into()),
-            inference_detail: detail,
-        });
+    {
+        let side = state.sidecar.lock().await;
+        if let Some(s) = side.as_ref() {
+            if s.is_alive() {
+                return Ok(EngineStatus {
+                    ready: true,
+                    mode: "local".into(),
+                    message: Some("Sidecar running — use push-to-talk or Transcribe.".into()),
+                    inference_detail: detail,
+                });
+            }
+        }
     }
-    if rem.is_some() {
-        return Ok(EngineStatus {
-            ready: true,
-            mode: "remote".into(),
-            message: Some("Connected to Yapper Node — use push-to-talk or Transcribe.".into()),
-            inference_detail: detail,
-        });
+    {
+        let rem = state.remote.lock().await;
+        if rem.is_some() {
+            return Ok(EngineStatus {
+                ready: true,
+                mode: "remote".into(),
+                message: Some("Connected to Yapper Node — use push-to-talk or Transcribe.".into()),
+                inference_detail: detail,
+            });
+        }
     }
     Ok(EngineStatus {
         ready: false,
@@ -1153,15 +1313,20 @@ async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     tokio::spawn(async move {
         model_idle_supervisor(app_spawn, idle_supervisor_run).await;
     });
+    let app_wd = app.clone();
+    tokio::spawn(async move {
+        sidecar_watchdog(app_wd, idle_supervisor_run).await;
+    });
     if let Ok(mut g) = state.hud_phase.lock() {
         *g = HudPhase::Idle;
     }
     let _ = hud::ensure_collapsed_visible(&app);
+    let inference_detail = state.inference_line.lock().await.clone();
     Ok(EngineStatus {
         ready: true,
         mode: "local".into(),
         message: Some("Sidecar running — use push-to-talk or Transcribe.".into()),
-        inference_detail: state.inference_line.lock().await.clone(),
+        inference_detail,
     })
 }
 
@@ -1192,12 +1357,21 @@ async fn wait_ptt_chunk_transcript(
     state: &AppState,
     seq: u64,
     local_sidecar: Option<Arc<SidecarSession>>,
+    audio_duration_secs: Option<f64>,
 ) -> Result<String, String> {
-    // First GPU/CPU run can compile kernels and download weights; keep generous.
-    const TIMEOUT: Duration = Duration::from_secs(600);
-    let deadline = Instant::now() + TIMEOUT;
+    // Scale with audio length; floor 600s for cold model loads, cap 3600s.
+    let timeout_secs = {
+        let dur = audio_duration_secs.unwrap_or(0.0).max(0.0);
+        let scaled = 90.0 + dur * 4.0;
+        scaled.clamp(600.0, 3600.0) as u64
+    };
+    let timeout = Duration::from_secs(timeout_secs);
+    let deadline = Instant::now() + timeout;
     let mut iter: u32 = 0;
-    ptt_log(format!("wait_chunk: waiting for final seq={seq} (timeout {:?})", TIMEOUT));
+    ptt_log(format!(
+        "wait_chunk: waiting for final seq={seq} (timeout {:?} audio_s={audio_duration_secs:?})",
+        timeout
+    ));
     loop {
         if Instant::now() > deadline {
             if let Some(side) = local_sidecar.as_ref() {
@@ -1216,6 +1390,12 @@ async fn wait_ptt_chunk_transcript(
         iter = iter.wrapping_add(1);
 
         let raw = if let Some(side) = local_sidecar.as_ref() {
+            if !side.is_alive() {
+                return Err(
+                    "The inference process exited while transcribing. Yapper will try to restart it — retry push-to-talk."
+                        .into(),
+                );
+            }
             side.pop_transcript_for_seq(seq).await?
         } else if let Some(rem) = state.remote.lock().await.as_ref() {
             let mut q = rem.pending.lock().await;
@@ -1224,8 +1404,6 @@ async fn wait_ptt_chunk_transcript(
             return Err("Engine not started".into());
         };
 
-        // Whisper/MLX decode often takes several seconds. The IPC queue stays empty until the sidecar
-        // prints one JSON line — that is normal, not a stuck queue.
         if iter.is_multiple_of(100) && iter > 0 {
             if let Some(side) = local_sidecar.as_ref() {
                 let elapsed = iter as f32 * 0.05;
@@ -1236,12 +1414,19 @@ async fn wait_ptt_chunk_transcript(
             }
         }
 
-        if let Some(text) = raw {
+        if let Some((text, underpunctuated)) = raw {
             ptt_log(format!(
-                "wait_chunk: got result seq={seq} raw_chars={} (postprocess next if non-empty)",
+                "wait_chunk: got result seq={seq} raw_chars={} underpunctuated={underpunctuated}",
                 text.len()
             ));
-            let text = apply_dictation_postprocess(app, state, text)?;
+            let text = apply_dictation_postprocess(
+                app,
+                state,
+                text,
+                underpunctuated,
+                local_sidecar.clone(),
+            )
+            .await?;
             ptt_log(format!("wait_chunk: returning seq={seq} final_chars={}", text.len()));
             return Ok(text);
         }
@@ -1373,7 +1558,7 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
 
     // One Whisper decode for the whole utterance avoids repeated short runs (hallucination cascades).
     const GAP_16K_MS: u32 = 70;
-    const MERGED_MAX_16K_SAMPLES: usize = 16_000 * 240;
+    const MERGED_MAX_16K_SAMPLES: usize = 16_000 * 600;
     let gap_16k = (16_000u32 * GAP_16K_MS / 1000) as usize;
     let mut pcm16k_merged: Vec<f32> = Vec::new();
     for (a, b) in &segments {
@@ -1412,7 +1597,8 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
             ));
             let _io = state.inference_io_lock.lock().await;
             side.send(&msg).await?;
-            combined = wait_ptt_chunk_transcript(&app, &state, seq, Some(Arc::clone(&side))).await?;
+            let audio_s = pcm16k_merged.len() as f64 / 16_000.0;
+            combined = wait_ptt_chunk_transcript(&app, &state, seq, Some(Arc::clone(&side)), Some(audio_s)).await?;
             ptt_log(format!("ptt_stop: merged transcript_chars={}", combined.len()));
         } else {
             ptt_log(format!(
@@ -1446,7 +1632,7 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
                 let _io = state.inference_io_lock.lock().await;
                 side.send(&msg).await?;
                 let piece =
-                    wait_ptt_chunk_transcript(&app, &state, seq, Some(Arc::clone(&side))).await?;
+                    wait_ptt_chunk_transcript(&app, &state, seq, Some(Arc::clone(&side)), Some(pcm16k.len() as f64 / 16_000.0)).await?;
                 ptt_log(format!(
                     "ptt_stop: segment {si} piece_chars={}",
                     piece.len()
@@ -1483,7 +1669,8 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
                 };
                 rem.tx.send(msg).map_err(|e| e.to_string())?;
             }
-            combined = wait_ptt_chunk_transcript(&app, &state, seq, None).await?;
+            let audio_s = pcm16k_merged.len() as f64 / 16_000.0;
+            combined = wait_ptt_chunk_transcript(&app, &state, seq, None, Some(audio_s)).await?;
         } else {
             for (si, (a, b)) in segments.iter().enumerate() {
                 let chunk = &samples[*a..*b];
@@ -1513,7 +1700,7 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
                     ptt_log(format!("ptt_stop: remote Chunk seq={seq}"));
                     rem.tx.send(msg).map_err(|e| e.to_string())?;
                 }
-                let piece = wait_ptt_chunk_transcript(&app, &state, seq, None).await?;
+                let piece = wait_ptt_chunk_transcript(&app, &state, seq, None, Some(pcm16k.len() as f64 / 16_000.0)).await?;
                 ptt_log(format!("ptt_stop: remote segment {si} piece_chars={}", piece.len()));
                 if !piece.is_empty() {
                     if !combined.is_empty() {

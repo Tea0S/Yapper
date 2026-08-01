@@ -30,9 +30,9 @@ USE_MLX = False
 CONFIG: dict[str, Any] = {}
 
 try:
-    from engines import moonshine_stream, parakeet_sherpa, sherpa_stream
+    from engines import moonshine_stream, parakeet_sherpa, punct_restore, sherpa_stream
 except ImportError:
-    from .engines import moonshine_stream, parakeet_sherpa, sherpa_stream
+    from .engines import moonshine_stream, parakeet_sherpa, punct_restore, sherpa_stream
 
 
 def _verbose() -> bool:
@@ -536,20 +536,45 @@ def _w_bool(w: dict[str, Any], key: str, default: bool) -> bool:
 
 # Whisper copies the *style* of initial_prompt. Empty prompts — or vocab lists with no
 # sentence punctuation — often lock the whole decode into no-punct / no-caps mode
-# (especially large-v3-turbo on short PTT clips). Always seed a punctuated style anchor.
+# (especially large-v3-turbo on short PTT clips). Always seed a punctuated style anchor
+# at the *end* of the prompt (Whisper only keeps the last ~224 tokens).
 _DEFAULT_PUNCT_STYLE_PROMPT = "Hello, welcome. This is clear, punctuated English."
+# Rough char budget so the style sentence survives truncation (~224 tokens ≈ 800 chars).
+_PROMPT_CHAR_BUDGET = 720
 
 
 def _punct_style_initial_prompt(user_prompt: str) -> str:
     user = (user_prompt or "").strip()
+    anchor = _DEFAULT_PUNCT_STYLE_PROMPT
     if not user:
-        return _DEFAULT_PUNCT_STYLE_PROMPT
-    if not any(c in user for c in ".?!"):
-        return f"{user}. {_DEFAULT_PUNCT_STYLE_PROMPT}"
-    return user
+        return anchor
+    # Always append the style anchor so a vocab list that happens to contain one
+    # period (e.g. "Dr. Smith") cannot bypass punct seeding.
+    combined = f"{user} {anchor}"
+    if len(combined) <= _PROMPT_CHAR_BUDGET:
+        return combined
+    # Keep the end of the user prompt + full anchor.
+    keep_user = _PROMPT_CHAR_BUDGET - len(anchor) - 1
+    if keep_user < 40:
+        return anchor
+    return f"{user[-keep_user:].lstrip()} {anchor}"
 
 
-def build_transcribe_kwargs(*, for_file: bool) -> dict[str, Any]:
+def looks_underpunctuated(text: str) -> bool:
+    """Heuristic: multi-word ASR with almost no sentence terminators."""
+    letters = sum(1 for c in text if c.isalpha())
+    if letters < 12:
+        return False
+    words = len([w for w in text.split() if w])
+    if words < 4:
+        return False
+    terminators = sum(1 for c in text if c in ".?!…")
+    if terminators == 0:
+        return True
+    return (letters / max(terminators, 1)) > 28.0
+
+
+def build_transcribe_kwargs(*, for_file: bool, duration_s: float | None = None) -> dict[str, Any]:
     """Merge init `whisper` dict with sane defaults (PCM vs file VAD differ)."""
     w: dict[str, Any] = CONFIG.get("whisper") or {}
     lang = w.get("language")
@@ -569,10 +594,15 @@ def build_transcribe_kwargs(*, for_file: bool) -> dict[str, Any]:
         else _w_bool(w, "vad_filter_pcm", True)
     )
 
+    beam_size = max(1, _w_int(w, "beam_size", 5))
+    # Long dictation: greedy decode is much faster and punct style is usually stable.
+    if duration_s is not None and duration_s > 90.0 and beam_size > 1:
+        beam_size = 1
+
     kw: dict[str, Any] = dict(
         language=language,
         vad_filter=vad_filter,
-        beam_size=max(1, _w_int(w, "beam_size", 5)),
+        beam_size=beam_size,
         best_of=max(1, _w_int(w, "best_of", 1)),
         patience=_w_float(w, "patience", 1.0),
         temperature=_w_float(w, "temperature", 0.0),
@@ -588,10 +618,10 @@ def build_transcribe_kwargs(*, for_file: bool) -> dict[str, Any]:
     return kw
 
 
-def _call_mlx_transcribe(audio: Any, *, for_file: bool) -> dict[str, Any]:
+def _call_mlx_transcribe(audio: Any, *, for_file: bool, duration_s: float | None = None) -> dict[str, Any]:
     import mlx_whisper
 
-    kw = build_transcribe_kwargs(for_file=for_file)
+    kw = build_transcribe_kwargs(for_file=for_file, duration_s=duration_s)
     wcfg = CONFIG.get("whisper") or {}
     hst = _w_float(wcfg, "hallucination_silence_threshold", 1.6)
     if kw.get("vad_filter") and not for_file:
@@ -664,7 +694,7 @@ def transcribe_pcm_i16(pcm: bytes, sample_rate: int) -> tuple[str, float]:
             f"trimmed_ms≈{trimmed_ms}"
         )
         t0 = time.perf_counter()
-        result = _call_mlx_transcribe(audio, for_file=False)
+        result = _call_mlx_transcribe(audio, for_file=False, duration_s=duration_s)
         dt = time.perf_counter() - t0
         text = _mlx_result_to_text(result, log_tag="transcribe_mlx")
         rtf = (dt / duration_s) if duration_s > 1e-6 else 0.0
@@ -680,16 +710,17 @@ def transcribe_pcm_i16(pcm: bytes, sample_rate: int) -> tuple[str, float]:
     duration_s = len(audio) / max(sample_rate, 1)
     # Never use faster-whisper's Silero VAD on the full clip here: it often zeroed live mic audio.
     # Rust already gates with energy VAD; we merge segments client-side for one coherent decode.
-    vf = build_transcribe_kwargs(for_file=False).get("vad_filter", False)
+    vf = build_transcribe_kwargs(for_file=False, duration_s=duration_s).get("vad_filter", False)
     vlog(
         f"transcribe_pcm: pcm_bytes={len(pcm)} sr={sample_rate} duration_s={duration_s:.3f} "
         f"trimmed_ms≈{trimmed_ms} vad_filter={vf}"
     )
     t0 = time.perf_counter()
-    transcribe_kw = build_transcribe_kwargs(for_file=False)
+    transcribe_kw = build_transcribe_kwargs(for_file=False, duration_s=duration_s)
     vlog(
         f"transcribe_pcm: initial_prompt={transcribe_kw.get('initial_prompt')!r} "
         f"language={transcribe_kw.get('language')!r} "
+        f"beam_size={transcribe_kw.get('beam_size')!r} "
         f"condition_on_previous_text={transcribe_kw.get('condition_on_previous_text')!r}"
     )
     hst = _w_float(CONFIG.get("whisper") or {}, "hallucination_silence_threshold", 1.6)
@@ -875,6 +906,7 @@ def handle_ensure_model() -> None:
 def handle_unload_model() -> None:
     unload_whisper()
     parakeet_sherpa.unload()
+    punct_restore.unload()
     emit({"type": "model_state", "loaded": False})
 
 
@@ -962,6 +994,7 @@ def handle_chunk(msg: dict) -> None:
                     "text": "[mock transcription]",
                     "seq": seq,
                     "rtf": 0.01,
+                    "underpunctuated": False,
                 }
             )
         return
@@ -981,6 +1014,7 @@ def handle_chunk(msg: dict) -> None:
                     "text": text,
                     "seq": int(seq),
                     "rtf": float(rtf),
+                    "underpunctuated": looks_underpunctuated(text),
                 }
             )
         else:
@@ -989,6 +1023,24 @@ def handle_chunk(msg: dict) -> None:
     except Exception as e:
         vlog(f"handle_chunk exception: {e!r}")
         emit({"type": "error", "message": f"transcribe failed: {e}"})
+
+
+def handle_restore_punct(msg: dict) -> None:
+    seq = int(msg.get("seq", 0))
+    text = msg.get("text") or ""
+    if not isinstance(text, str):
+        text = str(text)
+    model_dir = CONFIG.get("model_dir")
+    device = CONFIG.get("device") or "cpu"
+    try:
+        out = punct_restore.restore(text, model_dir if isinstance(model_dir, str) else None, str(device))
+        emit({"type": "restored", "seq": seq, "text": out})
+    except Exception as e:
+        vlog(f"handle_restore_punct: {e!r}")
+        # Soft-fail: return original text so dictation still completes (do not emit error).
+        emit({"type": "restored", "seq": seq, "text": text})
+        sys.stderr.write(f"[yapper-sidecar] grammar restore failed (using original): {e}\n")
+        sys.stderr.flush()
 
 
 def probe_audio_duration_secs(path: str) -> float | None:
@@ -1133,6 +1185,8 @@ def main() -> None:
             handle_end_stream(msg)
         elif t == "chunk":
             handle_chunk(msg)
+        elif t == "restore_punct":
+            handle_restore_punct(msg)
         elif t == "transcribe_file":
             handle_file(msg)
         elif t == "unload_model":

@@ -100,6 +100,7 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         ("live_feed_interval_ms", "200"),
         ("live_chunk_interval_ms", "2000"),
         ("live_min_audio_ms", "800"),
+        ("grammar_restore", "auto"),
     ] {
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",

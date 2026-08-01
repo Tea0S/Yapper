@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -55,6 +56,10 @@ pub enum SidecarIn {
         audio_b64: String,
         is_final: bool,
     },
+    RestorePunct {
+        seq: u64,
+        text: String,
+    },
     TranscribeFile {
         path: String,
     },
@@ -91,7 +96,14 @@ pub enum SidecarOut {
         compute_type: Option<String>,
     },
     Partial { text: String, seq: u64 },
-    Final { text: String, seq: u64, rtf: Option<f64> },
+    Final {
+        text: String,
+        seq: u64,
+        rtf: Option<f64>,
+        #[serde(default)]
+        underpunctuated: bool,
+    },
+    Restored { text: String, seq: u64 },
     StreamStarted { session_id: u64 },
     StreamPartial {
         session_id: u64,
@@ -204,10 +216,11 @@ pub(crate) fn take_stream_started_for_session(
 }
 
 /// Remove the first `Final` for `seq`, or the first `Error`. Other events stay queued.
+/// Returns `(text, underpunctuated)`.
 pub(crate) fn pop_sidecar_transcript_for_seq(
     q: &mut VecDeque<SidecarOut>,
     seq: u64,
-) -> Result<Option<String>, String> {
+) -> Result<Option<(String, bool)>, String> {
     let mut i = 0usize;
     while i < q.len() {
         match &q[i] {
@@ -228,10 +241,45 @@ pub(crate) fn pop_sidecar_transcript_for_seq(
                 ));
                 i += 1;
             }
-            SidecarOut::Final { text, .. } => {
+            SidecarOut::Final {
+                text,
+                underpunctuated,
+                ..
+            } => {
+                let t = text.clone();
+                let u = *underpunctuated;
+                q.remove(i);
+                ipc_log(format!(
+                    "pop: matched final seq={seq}, text_chars={} underpunctuated={u}",
+                    t.len()
+                ));
+                return Ok(Some((t, u)));
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(None)
+}
+
+/// Remove the first `Restored` for `seq`, or the first `Error`.
+pub(crate) fn pop_sidecar_restored_for_seq(
+    q: &mut VecDeque<SidecarOut>,
+    seq: u64,
+) -> Result<Option<String>, String> {
+    let mut i = 0usize;
+    while i < q.len() {
+        match &q[i] {
+            SidecarOut::Error { message } => {
+                let msg = message.clone();
+                q.remove(i);
+                return Err(msg);
+            }
+            SidecarOut::Restored { seq: s, .. } if *s != seq => {
+                i += 1;
+            }
+            SidecarOut::Restored { text, .. } => {
                 let t = text.clone();
                 q.remove(i);
-                ipc_log(format!("pop: matched final seq={seq}, text_chars={}", t.len()));
                 return Ok(Some(t));
             }
             _ => i += 1,
@@ -335,7 +383,12 @@ pub(crate) fn sidecar_out_one_liner(m: &SidecarOut) -> String {
             inference_device
         ),
         SidecarOut::Partial { seq, text } => format!("partial(seq={seq}, chars={})", text.len()),
-        SidecarOut::Final { seq, text, .. } => format!("final(seq={seq}, chars={})", text.len()),
+        SidecarOut::Final { seq, text, underpunctuated, .. } => {
+            format!("final(seq={seq}, chars={}, underpunct={underpunctuated})", text.len())
+        }
+        SidecarOut::Restored { seq, text } => {
+            format!("restored(seq={seq}, chars={})", text.len())
+        }
         SidecarOut::StreamStarted { session_id } => format!("stream_started(id={session_id})"),
         SidecarOut::StreamPartial {
             session_id,
@@ -381,6 +434,8 @@ pub struct SidecarSession {
     pub child: Child,
     writer: Arc<Mutex<tokio::process::ChildStdin>>,
     pub pending: Arc<Mutex<VecDeque<SidecarOut>>>,
+    /// Cleared when the stdout reader exits (process died / pipe closed).
+    pub alive: Arc<AtomicBool>,
 }
 
 impl SidecarSession {
@@ -471,6 +526,8 @@ impl SidecarSession {
 
         let pending = Arc::new(Mutex::new(VecDeque::new()));
         let pending_reader = Arc::clone(&pending);
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_reader = Arc::clone(&alive);
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
@@ -482,6 +539,15 @@ impl SidecarSession {
                             line.len()
                         ));
                         let mut q = pending_reader.lock().await;
+                        const PENDING_CAP: usize = 256;
+                        while q.len() >= PENDING_CAP {
+                            if let Some(d) = q.pop_front() {
+                                eprintln!(
+                                    "[yapper-ipc] pending queue full — dropped oldest: {}",
+                                    sidecar_out_one_liner(&d)
+                                );
+                            }
+                        }
                         q.push_back(msg);
                     }
                     Err(e) if !line.trim().is_empty() => {
@@ -494,6 +560,8 @@ impl SidecarSession {
                     Err(_) => {}
                 }
             }
+            alive_reader.store(false, Ordering::SeqCst);
+            eprintln!("[yapper-sidecar] stdout closed — inference process exited");
         });
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
@@ -506,6 +574,7 @@ impl SidecarSession {
             child,
             writer: Arc::new(Mutex::new(stdin)),
             pending,
+            alive,
         })
     }
 
@@ -608,9 +677,21 @@ impl SidecarSession {
         pop_sidecar_stream_for_session(&mut q, session_id)
     }
 
-    pub async fn pop_transcript_for_seq(&self, seq: u64) -> Result<Option<String>, String> {
+    pub async fn pop_transcript_for_seq(
+        &self,
+        seq: u64,
+    ) -> Result<Option<(String, bool)>, String> {
         let mut q = self.pending.lock().await;
         pop_sidecar_transcript_for_seq(&mut q, seq)
+    }
+
+    pub async fn pop_restored_for_seq(&self, seq: u64) -> Result<Option<String>, String> {
+        let mut q = self.pending.lock().await;
+        pop_sidecar_restored_for_seq(&mut q, seq)
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 
     pub async fn pop_partial_for_seq(&self, seq: u64) -> Result<Option<String>, String> {

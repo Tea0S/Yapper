@@ -9,6 +9,9 @@ from pathlib import Path
 SHERPA_RELEASE_BASE = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models"
 )
+SHERPA_PUNCT_RELEASE_BASE = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models"
+)
 
 # Legacy NeMo HF IDs stored in older Yapper settings.
 LEGACY_PARAKEET_IDS: dict[str, str] = {
@@ -34,7 +37,7 @@ def onnx_provider(device: str) -> str:
 
 
 def ensure_sherpa_tarball(model_id: str, model_dir: str | None) -> Path:
-    """Download and extract a sherpa-onnx release tarball if missing."""
+    """Download and extract a sherpa-onnx ASR release tarball if missing."""
     if not model_dir:
         raise RuntimeError("model_dir is required for sherpa-onnx models")
     root = Path(model_dir) / "sherpa"
@@ -48,6 +51,29 @@ def ensure_sherpa_tarball(model_id: str, model_dir: str | None) -> Path:
 
     archive = root / f"{model_id}.tar.bz2"
     url = f"{SHERPA_RELEASE_BASE}/{model_id}.tar.bz2"
+    _download_and_extract(url, archive, dest, root)
+    return dest
+
+
+def ensure_punct_tarball(model_id: str, model_dir: str | None) -> Path:
+    """Download and extract a sherpa-onnx punctuation model tarball if missing."""
+    if not model_dir:
+        raise RuntimeError("model_dir is required for sherpa-onnx punctuation models")
+    root = Path(model_dir) / "sherpa"
+    root.mkdir(parents=True, exist_ok=True)
+    dest = root / model_id
+    if (dest / "bpe.vocab").is_file() and (
+        (dest / "model.int8.onnx").is_file() or (dest / "model.onnx").is_file()
+    ):
+        return dest
+
+    archive = root / f"{model_id}.tar.bz2"
+    url = f"{SHERPA_PUNCT_RELEASE_BASE}/{model_id}.tar.bz2"
+    _download_and_extract(url, archive, dest, root)
+    return dest
+
+
+def _download_and_extract(url: str, archive: Path, dest: Path, root: Path) -> None:
     if not archive.is_file():
         tmp = archive.with_suffix(".part")
         req = urllib.request.Request(url, headers={"User-Agent": "yapper-sidecar/1.0"})
@@ -63,13 +89,12 @@ def ensure_sherpa_tarball(model_id: str, model_dir: str | None) -> Path:
         tf.extractall(extract_root)
     candidates = [p for p in extract_root.iterdir() if p.is_dir()]
     if not candidates:
-        raise RuntimeError(f"Empty sherpa archive: {model_id}")
+        raise RuntimeError(f"Empty sherpa archive from {url}")
     src = candidates[0]
     if dest.is_dir():
         shutil.rmtree(dest, ignore_errors=True)
     shutil.move(str(src), str(dest))
     shutil.rmtree(extract_root, ignore_errors=True)
-    return dest
 
 
 def transducer_paths(model_root: Path) -> tuple[str, str, str, str]:

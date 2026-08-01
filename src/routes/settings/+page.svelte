@@ -69,6 +69,7 @@
   let parakeetModel = $state(DEFAULT_PARAKEET_MODEL);
   let computeType = $state("int8");
   let tonePreset = $state("standard");
+  let grammarRestore = $state("auto");
   let mock = $state(false);
   let cuda = $state(false);
   let whisperDevice = $state("auto");
@@ -248,6 +249,11 @@
     tonePreset =
       (await invoke<string | null>("get_setting_cmd", { key: "tone_preset" })) ??
       "standard";
+    grammarRestore =
+      (await invoke<string | null>("get_setting_cmd", { key: "grammar_restore" })) ?? "auto";
+    if (!["off", "auto", "always"].includes(grammarRestore)) {
+      grammarRestore = "auto";
+    }
     const m = await invoke<string | null>("get_setting_cmd", {
       key: "mock_transcription",
     });
@@ -571,6 +577,7 @@
     await invoke("set_setting_cmd", { key: "parakeet_model", value: parakeetModel });
     await invoke("set_setting_cmd", { key: "compute_type", value: computeType });
     await invoke("set_setting_cmd", { key: "tone_preset", value: tonePreset });
+    await invoke("set_setting_cmd", { key: "grammar_restore", value: grammarRestore });
     await invoke("set_setting_cmd", {
       key: "mock_transcription",
       value: mock ? "true" : "false",
@@ -1460,6 +1467,19 @@
         <option value="standard">Standard</option>
         <option value="expressive">Expressive</option>
       </select>
+    </div>
+    <div class="field">
+      <label for="grammar-restore">Grammar restore</label>
+      <select id="grammar-restore" bind:value={grammarRestore}>
+        <option value="off">Off</option>
+        <option value="auto">Auto (when punctuation is missing)</option>
+        <option value="always">Always</option>
+      </select>
+      <p class="field-hint">
+        Optional sherpa-onnx pass that restores periods, commas, questions, and capitalization when
+        Whisper drops into no-punct mode. Spoken commands (period, comma, …) still run first.
+        First use downloads a small English model into the cache.
+      </p>
     </div>
     <button type="button" class="btn" onclick={saveCore}>Save style</button>
   </div>

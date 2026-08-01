@@ -272,13 +272,26 @@ impl PttCapture {
 }
 
 fn push_interleaved_to_mono(buffer: &mut Vec<f32>, data: &[f32], channels: usize) {
-    if channels <= 1 {
-        buffer.extend_from_slice(data);
+    // Soft cap ~15 minutes at 48 kHz mono — prevents multi-hour accidental holds from OOM.
+    const MAX_SAMPLES: usize = 15 * 60 * 48_000;
+    if buffer.len() >= MAX_SAMPLES {
         return;
     }
+    let room = MAX_SAMPLES - buffer.len();
+    if channels <= 1 {
+        let n = data.len().min(room);
+        buffer.extend_from_slice(&data[..n]);
+        return;
+    }
+    let max_frames = room;
+    let mut frames = 0usize;
     for frame in data.chunks_exact(channels) {
+        if frames >= max_frames {
+            break;
+        }
         let s: f32 = frame.iter().sum::<f32>() / channels as f32;
         buffer.push(s);
+        frames += 1;
     }
 }
 
