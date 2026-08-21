@@ -26,7 +26,7 @@
   let cTo = $state("");
   let dictIoMsg = $state("");
   let dictIoErr = $state("");
-  /** Merge updates matching term+scope; replace clears the dictionary first. */
+  /** Merge updates matching rows; replace clears dictionary (and corrections if the file includes them). */
   let importMode = $state<"merge" | "replace">("merge");
 
   async function load() {
@@ -81,14 +81,14 @@
     dictIoErr = "";
     dictIoMsg = "";
     const path = await save({
-      title: "Export dictionary",
+      title: "Export dictionary and corrections",
       defaultPath: "yapper-dictionary.json",
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (path == null) return;
     try {
       await invoke("export_dictionary_to_path", { path });
-      dictIoMsg = `Exported to ${path}`;
+      dictIoMsg = `Exported dictionary and corrections to ${path}`;
     } catch (e) {
       dictIoErr = String(e);
     }
@@ -98,20 +98,22 @@
     dictIoErr = "";
     dictIoMsg = "";
     const path = await open({
-      title: "Import dictionary",
+      title: "Import dictionary and corrections",
       multiple: false,
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (path == null || typeof path !== "string") return;
     try {
-      const summary = await invoke<{ inserted: number; updated: number }>(
-        "import_dictionary_from_path",
-        { path, replace: importMode === "replace" },
-      );
+      const summary = await invoke<{
+        inserted: number;
+        updated: number;
+        corrections_inserted: number;
+        corrections_updated: number;
+      }>("import_dictionary_from_path", { path, replace: importMode === "replace" });
       if (importMode === "replace") {
-        dictIoMsg = `Imported ${summary.inserted} entries (replaced all).`;
+        dictIoMsg = `Imported ${summary.inserted} dictionary entries and ${summary.corrections_inserted} corrections (replaced matching lists).`;
       } else {
-        dictIoMsg = `Imported: ${summary.inserted} new, ${summary.updated} updated.`;
+        dictIoMsg = `Dictionary: ${summary.inserted} new, ${summary.updated} updated. Corrections: ${summary.corrections_inserted} new, ${summary.corrections_updated} updated.`;
       }
       await load();
     } catch (e) {
@@ -120,27 +122,29 @@
   }
 </script>
 
+<div class="dict-io">
+  <button type="button" class="btn" onclick={exportDictionary}>Export…</button>
+  <button type="button" class="btn" onclick={importDictionary}>Import…</button>
+  <label class="import-mode">
+    <span class="sr-only">Import mode</span>
+    <select bind:value={importMode} title="Import mode">
+      <option value="merge">Merge with existing</option>
+      <option value="replace">Replace all</option>
+    </select>
+  </label>
+</div>
+<p class="muted io-hint">Export includes dictionary and corrections so you can take the same setup to another machine.</p>
+{#if dictIoMsg}
+  <p class="io-ok">{dictIoMsg}</p>
+{/if}
+{#if dictIoErr}
+  <p class="io-err">{dictIoErr}</p>
+{/if}
+
 <section class="grid">
   <div>
     <h1>Dictionary</h1>
     <p class="muted">Word or phrase boosts (word-boundary aware for <code>word</code> scope).</p>
-    <div class="dict-io">
-      <button type="button" class="btn" onclick={exportDictionary}>Export…</button>
-      <button type="button" class="btn" onclick={importDictionary}>Import…</button>
-      <label class="import-mode">
-        <span class="sr-only">Import mode</span>
-        <select bind:value={importMode} title="Import mode">
-          <option value="merge">Merge with existing</option>
-          <option value="replace">Replace all</option>
-        </select>
-      </label>
-    </div>
-    {#if dictIoMsg}
-      <p class="io-ok">{dictIoMsg}</p>
-    {/if}
-    {#if dictIoErr}
-      <p class="io-err">{dictIoErr}</p>
-    {/if}
     <div class="panel">
       <div class="field">
         <label for="t">Term</label>
@@ -249,7 +253,10 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem 0.75rem;
-    margin-bottom: 0.75rem;
+    margin-bottom: 0.35rem;
+  }
+  .io-hint {
+    margin: 0 0 0.75rem;
   }
   .import-mode select {
     font-size: 0.88rem;

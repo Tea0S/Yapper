@@ -16,11 +16,11 @@ mod win_spawn;
 mod win_taskbar_icon;
 
 use crate::db::{
-    check_keybind_conflicts, get_setting, import_dictionary_merge, import_dictionary_replace,
-    list_corrections, list_dictionary, list_keybinds, load_corrections_for_postprocess,
-    load_dictionary_for_postprocess, set_keybind, set_setting, upsert_correction, upsert_dictionary,
-    CorrectionEntry, DictionaryEntry, DictionaryExportFile, DictionaryExportItem, DictionaryImportRoot,
-    KeybindRow,
+    check_keybind_conflicts, get_setting, import_corrections_merge, import_corrections_replace,
+    import_dictionary_merge, import_dictionary_replace, list_corrections, list_dictionary,
+    list_keybinds, load_corrections_for_postprocess, load_dictionary_for_postprocess, set_keybind,
+    set_setting, upsert_correction, upsert_dictionary, CorrectionEntry, CorrectionExportItem,
+    DictionaryEntry, DictionaryExportFile, DictionaryExportItem, DictionaryImportRoot, KeybindRow,
 };
 use crate::paths::{db_path, model_cache_dir, sidecar_script_path};
 use crate::sidecar::{
@@ -1014,15 +1014,18 @@ fn delete_dictionary_cmd(app: tauri::AppHandle, id: i64) -> Result<(), String> {
 struct DictionaryImportSummary {
     inserted: usize,
     updated: usize,
+    corrections_inserted: usize,
+    corrections_updated: usize,
 }
 
 #[tauri::command]
 fn export_dictionary_to_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let conn = open_db(&app)?;
     let rows = list_dictionary(&conn).map_err(|e| e.to_string())?;
+    let corr_rows = list_corrections(&conn).map_err(|e| e.to_string())?;
     let file = DictionaryExportFile {
         format: "yapper-dictionary".into(),
-        version: 1,
+        version: 2,
         dictionary: rows
             .into_iter()
             .map(|e| DictionaryExportItem {
@@ -1032,6 +1035,16 @@ fn export_dictionary_to_path(app: tauri::AppHandle, path: String) -> Result<(), 
                 scope: e.scope,
             })
             .collect(),
+        corrections: Some(
+            corr_rows
+                .into_iter()
+                .map(|e| CorrectionExportItem {
+                    mishear: e.mishear,
+                    intended: e.intended,
+                    priority: e.priority,
+                })
+                .collect(),
+        ),
     };
     let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| e.to_string())
@@ -1047,22 +1060,43 @@ fn import_dictionary_from_path(
     let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
     let root: DictionaryImportRoot =
         serde_json::from_str(&text).map_err(|e| format!("Invalid dictionary file: {e}"))?;
-    let items = root.into_items();
-    if items.is_empty() {
-        return Err("File contains no dictionary entries.".into());
+    let (items, corrections) = root.into_parts();
+    let has_corrections = corrections
+        .as_ref()
+        .is_some_and(|c| c.iter().any(|e| !e.mishear.trim().is_empty()));
+    if items.iter().all(|e| e.term.trim().is_empty()) && !has_corrections {
+        return Err("File contains no dictionary or correction entries.".into());
     }
     let conn = open_db(&app)?;
     if replace {
         import_dictionary_replace(&conn, &items).map_err(|e| e.to_string())?;
         let inserted = items.iter().filter(|e| !e.term.trim().is_empty()).count();
+        let corrections_inserted = if let Some(ref corr) = corrections {
+            import_corrections_replace(&conn, corr).map_err(|e| e.to_string())?;
+            corr.iter().filter(|e| !e.mishear.trim().is_empty()).count()
+        } else {
+            0
+        };
         Ok(DictionaryImportSummary {
             inserted,
             updated: 0,
+            corrections_inserted,
+            corrections_updated: 0,
         })
     } else {
         let (inserted, updated) =
             import_dictionary_merge(&conn, &items).map_err(|e| e.to_string())?;
-        Ok(DictionaryImportSummary { inserted, updated })
+        let (corrections_inserted, corrections_updated) = if let Some(ref corr) = corrections {
+            import_corrections_merge(&conn, corr).map_err(|e| e.to_string())?
+        } else {
+            (0, 0)
+        };
+        Ok(DictionaryImportSummary {
+            inserted,
+            updated,
+            corrections_inserted,
+            corrections_updated,
+        })
     }
 }
 
@@ -1532,7 +1566,7 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
     let vad_min_silence_ms: u32 = get_setting(&conn, "vad_min_silence_ms")
         .map_err(|e| e.to_string())?
         .and_then(|s| s.parse().ok())
-        .unwrap_or(300)
+        .unwrap_or(500)
         .clamp(50, 3000);
 
     ptt_log(format!(
@@ -1557,7 +1591,9 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
     ));
 
     // One Whisper decode for the whole utterance avoids repeated short runs (hallucination cascades).
-    const GAP_16K_MS: u32 = 70;
+    // Keep the stitch gap tiny: longer pads read as sentence ends and Whisper inserts periods on
+    // mid-thought pauses. Speech spans already have trailing silence trimmed in vad_segments.
+    const GAP_16K_MS: u32 = 20;
     const MERGED_MAX_16K_SAMPLES: usize = 16_000 * 600;
     let gap_16k = (16_000u32 * GAP_16K_MS / 1000) as usize;
     let mut pcm16k_merged: Vec<f32> = Vec::new();

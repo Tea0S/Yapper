@@ -237,13 +237,30 @@ fn default_dict_file_version() -> u32 {
     1
 }
 
+fn default_corr_export_priority() -> i64 {
+    20
+}
+
+/// One row in a corrections import/export file (no DB id — portable across devices).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionExportItem {
+    pub mishear: String,
+    pub intended: String,
+    #[serde(default = "default_corr_export_priority")]
+    pub priority: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DictionaryExportFile {
     #[serde(default)]
     pub format: String,
     #[serde(default = "default_dict_file_version")]
     pub version: u32,
+    #[serde(default)]
     pub dictionary: Vec<DictionaryExportItem>,
+    /// Absent in older files; `Some` (even empty) means this export includes corrections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrections: Option<Vec<CorrectionExportItem>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,10 +271,11 @@ pub enum DictionaryImportRoot {
 }
 
 impl DictionaryImportRoot {
-    pub fn into_items(self) -> Vec<DictionaryExportItem> {
+    /// Dictionary rows, plus corrections when the file actually included that array.
+    pub fn into_parts(self) -> (Vec<DictionaryExportItem>, Option<Vec<CorrectionExportItem>>) {
         match self {
-            DictionaryImportRoot::File(f) => f.dictionary,
-            DictionaryImportRoot::List(v) => v,
+            DictionaryImportRoot::File(f) => (f.dictionary, f.corrections),
+            DictionaryImportRoot::List(v) => (v, None),
         }
     }
 }
@@ -342,6 +360,76 @@ pub fn import_dictionary_replace(
     Ok(())
 }
 
+/// Returns `(inserted, updated)`. Matching key is trimmed `mishear`.
+pub fn import_corrections_merge(
+    conn: &Connection,
+    entries: &[CorrectionExportItem],
+) -> rusqlite::Result<(usize, usize)> {
+    let mut inserted = 0usize;
+    let mut updated = 0usize;
+    let tx = conn.unchecked_transaction()?;
+    for e in entries {
+        let mishear = e.mishear.trim();
+        if mishear.is_empty() {
+            continue;
+        }
+        let intended = e.intended.trim();
+        let intended = if intended.is_empty() {
+            mishear
+        } else {
+            intended
+        };
+        let id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM corrections WHERE mishear = ?1",
+                params![mishear],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = id {
+            tx.execute(
+                "UPDATE corrections SET intended = ?1, priority = ?2 WHERE id = ?3",
+                params![intended, e.priority, id],
+            )?;
+            updated += 1;
+        } else {
+            tx.execute(
+                "INSERT INTO corrections (mishear, intended, priority) VALUES (?1, ?2, ?3)",
+                params![mishear, intended, e.priority],
+            )?;
+            inserted += 1;
+        }
+    }
+    tx.commit()?;
+    Ok((inserted, updated))
+}
+
+pub fn import_corrections_replace(
+    conn: &Connection,
+    entries: &[CorrectionExportItem],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM corrections", [])?;
+    for e in entries {
+        let mishear = e.mishear.trim();
+        if mishear.is_empty() {
+            continue;
+        }
+        let intended = e.intended.trim();
+        let intended = if intended.is_empty() {
+            mishear
+        } else {
+            intended
+        };
+        tx.execute(
+            "INSERT INTO corrections (mishear, intended, priority) VALUES (?1, ?2, ?3)",
+            params![mishear, intended, e.priority],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CorrectionEntry {
     pub id: Option<i64>,
@@ -413,4 +501,80 @@ pub fn load_dictionary_for_postprocess(conn: &Connection) -> rusqlite::Result<Ve
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    fn dict(term: &str, replacement: &str) -> DictionaryExportItem {
+        DictionaryExportItem {
+            term: term.into(),
+            replacement: replacement.into(),
+            priority: 10,
+            scope: "word".into(),
+        }
+    }
+
+    fn corr(mishear: &str, intended: &str) -> CorrectionExportItem {
+        CorrectionExportItem {
+            mishear: mishear.into(),
+            intended: intended.into(),
+            priority: 20,
+        }
+    }
+
+    #[test]
+    fn old_dictionary_file_has_no_corrections_field() {
+        let root: DictionaryImportRoot = serde_json::from_str(
+            r#"{"format":"yapper-dictionary","version":1,"dictionary":[{"term":"a","replacement":"b"}]}"#,
+        )
+        .unwrap();
+        let (d, c) = root.into_parts();
+        assert_eq!(d.len(), 1);
+        assert!(c.is_none());
+    }
+
+    #[test]
+    fn export_with_empty_corrections_is_some() {
+        let root: DictionaryImportRoot = serde_json::from_str(
+            r#"{"format":"yapper-dictionary","version":2,"dictionary":[],"corrections":[]}"#,
+        )
+        .unwrap();
+        let (d, c) = root.into_parts();
+        assert!(d.is_empty());
+        assert_eq!(c.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn merge_and_replace_corrections() {
+        let conn = mem();
+        import_corrections_merge(&conn, &[corr("wrapper flow", "WisprFlow")]).unwrap();
+        let (ins, upd) =
+            import_corrections_merge(&conn, &[corr("wrapper flow", "Wispr Flow")]).unwrap();
+        assert_eq!((ins, upd), (0, 1));
+        let rows = list_corrections(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].intended, "Wispr Flow");
+
+        import_corrections_replace(&conn, &[corr("foo", "bar")]).unwrap();
+        let rows = list_corrections(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].mishear, "foo");
+    }
+
+    #[test]
+    fn replace_dictionary_without_corrections_leaves_corrections() {
+        let conn = mem();
+        import_corrections_merge(&conn, &[corr("old", "kept")]).unwrap();
+        import_dictionary_replace(&conn, &[dict("term", "rep")]).unwrap();
+        assert_eq!(list_dictionary(&conn).unwrap().len(), 1);
+        assert_eq!(list_corrections(&conn).unwrap()[0].intended, "kept");
+    }
 }
