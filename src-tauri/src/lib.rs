@@ -1,4 +1,5 @@
 mod audio;
+mod dictation;
 mod db;
 mod global_shortcuts;
 mod hud;
@@ -88,11 +89,32 @@ fn whisper_decode_options_from_db(conn: &rusqlite::Connection) -> WhisperDecodeO
             .unwrap_or(1.6)
             .clamp(0.0, 3.0),
         condition_on_previous_text: truthy("whisper_condition_on_previous_text", false),
-        initial_prompt: s("whisper_initial_prompt", ""),
+        initial_prompt: dictionary_prompt(conn, &s("whisper_initial_prompt", "")),
         language: s("whisper_language", ""),
-        vad_filter_pcm: truthy("whisper_vad_filter_pcm", true),
+        vad_filter_pcm: truthy("whisper_vad_filter_pcm", false),
         vad_filter_file: truthy("whisper_vad_filter_file", true),
     }
+}
+
+fn dictionary_prompt(conn: &rusqlite::Connection, user_prompt: &str) -> String {
+    if get_setting(conn, "dictionary_recognition_hints").ok().flatten().as_deref() == Some("false") {
+        return user_prompt.to_string();
+    }
+    let mut entries = list_dictionary(conn).unwrap_or_default();
+    entries.sort_by(|a, b| b.priority.cmp(&a.priority));
+    let mut terms = Vec::new();
+    let mut remaining = 400usize;
+    for entry in entries {
+        let term = if entry.replacement.trim().is_empty() { entry.term.trim() } else { entry.replacement.trim() };
+        let term = term.replace(['\n', '\r'], " ");
+        let n = term.chars().count();
+        if n == 0 || n > remaining || terms.contains(&term) { continue; }
+        remaining = remaining.saturating_sub(n + 2);
+        terms.push(term);
+        if terms.len() >= 32 { break; }
+    }
+    if terms.is_empty() { return user_prompt.to_string(); }
+    format!("{}\nVocabulary: {}.", user_prompt.trim(), terms.join(", ")).trim().to_string()
 }
 
 fn inference_model_for_init(conn: &rusqlite::Connection) -> rusqlite::Result<String> {
@@ -119,6 +141,28 @@ fn live_preview_wanted(conn: &rusqlite::Connection) -> bool {
             .flatten()
             .as_deref()
             != Some("true")
+}
+
+const DICTATION_OUTCOME_TTL: Duration = Duration::from_secs(3);
+
+fn set_dictation_outcome(state: &AppState, message: impl Into<String>) {
+    if let Ok(mut g) = state.last_dictation_outcome.lock() {
+        *g = Some((message.into(), Instant::now()));
+    }
+}
+
+fn take_dictation_outcome_if_fresh(state: &AppState) -> (String, bool) {
+    let Ok(mut g) = state.last_dictation_outcome.lock() else {
+        return (String::new(), false);
+    };
+    match g.as_ref() {
+        Some((msg, at)) if at.elapsed() < DICTATION_OUTCOME_TTL => (msg.clone(), false),
+        Some(_) => {
+            *g = None;
+            (String::new(), true)
+        }
+        None => (String::new(), false),
+    }
 }
 
 fn live_streaming_engine(conn: &rusqlite::Connection) -> String {
@@ -442,7 +486,7 @@ async fn end_live_stream(app: &tauri::AppHandle, state: &AppState) {
         Ok(c) => c,
         Err(_) => return,
     };
-    if !live_preview_wanted(&conn) {
+    if !live_preview_wanted(&conn) || dictation::enabled(app, "background_dictation", true) {
         return;
     }
     let session_id = state.live_stream_session_id.swap(0, Ordering::SeqCst);
@@ -508,13 +552,6 @@ pub(crate) fn handle_new_window_request<R: Runtime>(url: Url) -> NewWindowRespon
         let _ = open::that(url.as_str());
     }
     NewWindowResponse::Deny
-}
-
-struct ClearPttSession(Arc<AtomicBool>);
-impl Drop for ClearPttSession {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
 }
 
 struct ClearInferenceBusy(Arc<AtomicBool>);
@@ -778,6 +815,7 @@ async fn model_idle_supervisor(app: tauri::AppHandle, run_id: u64) {
         }
         if state.ptt_session_active.load(Ordering::SeqCst)
             || state.inference_busy.load(Ordering::SeqCst)
+            || dictation::busy(&state).await
         {
             continue;
         }
@@ -804,6 +842,8 @@ async fn model_idle_supervisor(app: tauri::AppHandle, run_id: u64) {
         if !state.local_model_in_memory.load(Ordering::SeqCst) {
             continue;
         }
+        let Ok(_work) = state.dictation.work.try_lock() else { continue; };
+        if state.ptt_session_active.load(Ordering::SeqCst) { continue; }
         let send_ok = match state.sidecar.lock().await.clone() {
             Some(side) => side.send(&SidecarIn::UnloadModel).await.is_ok(),
             None => false,
@@ -1171,6 +1211,9 @@ async fn engine_status(state: State<'_, AppState>) -> Result<EngineStatus, Strin
 
 #[tauri::command]
 async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<EngineStatus, String> {
+    let _capture = state.dictation.capture.try_lock().map_err(|_| "Recording is stopping. Try again shortly.".to_string())?;
+    if _capture.is_some() { return Err("Finish recording before restarting the engine".into()); }
+    let _jobs = state.dictation.work.try_lock().map_err(|_| "Wait for dictation processing to finish before restarting the engine".to_string())?;
     let conn = open_db(&app)?;
     let host = get_setting(&conn, "inference_host")
         .map_err(|e| e.to_string())?
@@ -1366,6 +1409,9 @@ async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
 
 #[tauri::command]
 async fn engine_stop(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let _capture = state.dictation.capture.try_lock().map_err(|_| "Recording is stopping. Try again shortly.".to_string())?;
+    if _capture.is_some() { return Err("Finish recording before stopping the engine".into()); }
+    let _jobs = state.dictation.work.try_lock().map_err(|_| "Wait for processing to finish before stopping the engine".to_string())?;
     state.idle_run_id.fetch_add(1, Ordering::SeqCst);
     state.ptt_session_active.store(false, Ordering::SeqCst);
     state.inference_busy.store(false, Ordering::SeqCst);
@@ -1468,6 +1514,10 @@ async fn wait_ptt_chunk_transcript(
 }
 
 pub(crate) async fn ptt_start_inner(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    dictation::start(app, state, true).await
+}
+
+async fn start_capture(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
     ptt_log("ptt_start: begin");
     state.live_audio_cursor.store(0, Ordering::SeqCst);
     let session_id = next_seq(&state.seq);
@@ -1504,39 +1554,24 @@ pub(crate) async fn ptt_start_inner(app: &tauri::AppHandle, state: &AppState) ->
         state.ptt_session_active.store(false, Ordering::SeqCst);
         return Err(e);
     }
-    try_spawn_live_preview(app, state).await;
+    if !dictation::enabled(app, "background_dictation", true) && !dictation::busy(state).await {
+        try_spawn_live_preview(app, state).await;
+    } else {
+        state.live_stream_session_id.store(0, Ordering::SeqCst);
+    }
     Ok(())
 }
 
 #[tauri::command]
 async fn ptt_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    ptt_start_inner(&app, &state).await
+    dictation::start(&app, &state, false).await
 }
 
 pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> Result<String, String> {
-    ptt_log("ptt_stop: begin");
-    abort_live_preview_task(state).await;
-    *state.live_hud_preview.lock().await = String::new();
-    // Preview-only: tear down the streaming session. Never paste stream_final —
-    // Moonshine/Sherpa often stutter or double near endpoint; batch Whisper/Parakeet commits.
-    end_live_stream(app, state).await;
-    *state.live_last_partial_text.lock().await = String::new();
-    let _hud_collapse = hud::HudCollapseAfterPtt::new(&app);
-    {
-        let mut g = state.hud_phase.lock().map_err(|e| e.to_string())?;
-        *g = HudPhase::Transcribing;
-    }
-    let _clear_ptt = ClearPttSession(state.ptt_session_active.clone());
-    let ptt = state.ptt.clone();
-    let stop_handle = tokio::task::spawn_blocking(move || ptt.stop());
-    let (samples, rate) = tokio::time::timeout(Duration::from_secs(45), stop_handle)
-        .await
-        .map_err(|_| {
-            "Microphone stop timed out — the capture thread may be stuck; restart the inference engine."
-                .to_string()
-        })?
-        .map_err(|e| e.to_string())??;
+    dictation::stop(app, state).await
+}
 
+async fn transcribe_recording(app: &tauri::AppHandle, state: &AppState, samples: &[f32], rate: u32) -> Result<String, String> {
     let conn = open_db(&app)?;
     let mic_peak: f32 = get_setting(&conn, "mic_normalize_peak")
         .map_err(|e| e.to_string())?
@@ -1575,6 +1610,7 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
 
     if samples.is_empty() {
         ptt_log("ptt_stop: empty buffer → return Ok(\"\")");
+        set_dictation_outcome(state, "Hold longer — nothing pasted");
         return Ok(String::new());
     }
 
@@ -1582,13 +1618,21 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
         ptt_log("ptt_stop: live preview was on — commit via batch Whisper/Parakeet (not stream_final)");
     }
 
-    ensure_local_model_loaded(&app, &state).await?;
-
-    let segments = vad_segments(&samples, threshold, vad_min_silence_ms, rate);
+    let adaptive = dictation::enabled(app, "adaptive_microphone", true);
+    let threshold = if adaptive { audio::adaptive_threshold(&samples, rate, threshold) } else { threshold };
+    let segments = if adaptive { audio::padded_vad_segments(&samples, threshold, vad_min_silence_ms, rate) } else { vad_segments(&samples, threshold, vad_min_silence_ms, rate) };
     ptt_log(format!(
         "ptt_stop: vad_segments count={} (Rust energy gate before Whisper)",
         segments.len()
     ));
+
+    if segments.is_empty() {
+        ptt_log("ptt_stop: no speech segments → return Ok(\"\")");
+        set_dictation_outcome(state, "No speech heard — hold and speak");
+        return Ok(String::new());
+    }
+
+    ensure_local_model_loaded(app, state).await?;
 
     // One Whisper decode for the whole utterance avoids repeated short runs (hallucination cascades).
     // Keep the stitch gap tiny: longer pads read as sentence ends and Whisper inserts periods on
@@ -1754,8 +1798,6 @@ pub(crate) async fn ptt_stop_inner(app: &tauri::AppHandle, state: &AppState) -> 
         "ptt_stop: done combined_chars={}",
         combined.len()
     ));
-    *state.last_transcript.lock().await = combined.clone();
-    let _ = app.emit("transcript", combined.clone());
     touch_model_activity(state);
     Ok(combined)
 }
@@ -1867,6 +1909,7 @@ async fn transcribe_file(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<String, String> {
+    let _jobs = state.dictation.work.lock().await;
     let _busy = ClearInferenceBusy(state.inference_busy.clone());
     state.inference_busy.store(true, Ordering::SeqCst);
     ensure_local_model_loaded(&app, &state).await?;
@@ -1915,6 +1958,9 @@ async fn transcribe_file(
 struct HudSnapshot {
     phase: HudPhase,
     preview: String,
+    /// Brief post-dictation status (empty hold, pasted count). Empty when idle/expired.
+    outcome: String,
+    pending: usize,
 }
 
 #[derive(Serialize)]
@@ -1935,17 +1981,25 @@ fn hud_chrome_info() -> HudChromeInfo {
 }
 
 #[tauri::command]
-fn hud_snapshot(state: State<'_, AppState>) -> Result<HudSnapshot, String> {
-    let g = state.hud_phase.lock().map_err(|e| e.to_string())?;
-    let preview = if *g == HudPhase::Listening {
-        state.live_hud_preview.blocking_lock().clone()
-    } else {
-        String::new()
-    };
-    Ok(HudSnapshot {
-        phase: *g,
-        preview,
-    })
+async fn hud_snapshot(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<HudSnapshot, String> {
+    let mut phase = *state.hud_phase.lock().map_err(|e| e.to_string())?;
+    let pending = dictation::pending_count(&state).await;
+    if phase != HudPhase::Hidden {
+        if state.ptt_session_active.load(Ordering::SeqCst) { phase = HudPhase::Listening; }
+        else if pending > 0 { phase = HudPhase::Transcribing; }
+    }
+    let preview = if phase == HudPhase::Listening { state.live_hud_preview.lock().await.clone() } else { String::new() };
+    let (outcome, expired) = take_dictation_outcome_if_fresh(&state);
+    if expired && phase == HudPhase::Idle {
+        let _ = hud::set_layout(&app, hud::HudLayout::Collapsed);
+    }
+    Ok(HudSnapshot { phase, preview, outcome, pending })
+}
+
+/// Latest dictation outcome for the main window (Home tips / status). Same TTL as HUD.
+#[tauri::command]
+fn last_dictation_outcome_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(take_dictation_outcome_if_fresh(&state).0)
 }
 
 /// Apply `hud_widget_enabled` and whether the engine is running — show, hide, or keep hidden.
@@ -2068,6 +2122,13 @@ pub fn run() {
 
             let state = AppState::new(tone_dir.clone(), audio::PttController::spawn());
             app.manage(state);
+            let cleanup_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    dictation::expire(&cleanup_app.state::<AppState>()).await;
+                }
+            });
 
             let main_cfg = app
                 .config()
@@ -2126,6 +2187,10 @@ pub fn run() {
             engine_status,
             ptt_start,
             ptt_stop,
+            dictation::dictation_jobs,
+            dictation::retry_dictation,
+            dictation::discard_dictation,
+            dictation::benchmark_dictation,
             transcribe_file,
             cuda_available,
             list_audio_input_devices,
@@ -2133,6 +2198,7 @@ pub fn run() {
             install_nvidia_whisper_libs,
             hud_chrome_info,
             hud_snapshot,
+            last_dictation_outcome_cmd,
             hud_sync_visibility_cmd,
             focus_main_window,
             sync_windows_taskbar_icon,
@@ -2147,4 +2213,21 @@ pub fn run() {
                 cleanup_before_exit(app_handle);
             }
         });
+}
+
+#[cfg(test)]
+mod recognition_hint_tests {
+    use super::*;
+
+    #[test]
+    fn dictionary_hints_respect_priority_budget_and_opt_out() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        for (term, priority) in [("low", 0), ("Yapper", 100), ("Yapper", 99)] {
+            upsert_dictionary(&conn, &DictionaryEntry { id: None, term: term.into(), replacement: String::new(), priority, scope: "word".into() }).unwrap();
+        }
+        upsert_dictionary(&conn, &DictionaryEntry { id: None, term: "x".repeat(500), replacement: String::new(), priority: 200, scope: "word".into() }).unwrap();
+        assert_eq!(dictionary_prompt(&conn, "User style."), "User style.\nVocabulary: Yapper, low.");
+        set_setting(&conn, "dictionary_recognition_hints", "false").unwrap();
+        assert_eq!(dictionary_prompt(&conn, "User style."), "User style.");
+    }
 }

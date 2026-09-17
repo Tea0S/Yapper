@@ -6,7 +6,7 @@
   import { page } from "$app/stores";
   import { invoke } from "@tauri-apps/api/core";
   import { bindYapperShortcuts } from "$lib/shortcuts";
-  import { applyUiTheme, loadUiTheme } from "$lib/theme";
+  import { applyUiTheme, loadHighContrast, loadUiTheme } from "$lib/theme";
 
   interface Props {
     children?: import("svelte").Snippet;
@@ -61,7 +61,8 @@
     void loadInstanceTag();
     void (async () => {
       const mode = await loadUiTheme();
-      if (!cancelled) applyUiTheme(mode);
+      const contrast = await loadHighContrast();
+      if (!cancelled) applyUiTheme(mode, contrast);
     })();
 
     if (typeof window !== "undefined" && window.location.pathname === "/hud") {

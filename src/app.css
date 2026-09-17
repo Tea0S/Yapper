@@ -38,6 +38,52 @@
   }
 }
 
+/* High contrast — stronger borders/text; works with light or dark theme. */
+:root[data-contrast="high"] {
+  --bg: #000000;
+  --bg-elevated: #0a0a0a;
+  --border: #ffffff;
+  --text: #ffffff;
+  --text-muted: #e8e8e8;
+  --accent: #ffff00;
+  --accent-dim: #ffd700;
+  --danger: #ff6b6b;
+}
+
+:root[data-theme="light"][data-contrast="high"] {
+  --bg: #ffffff;
+  --bg-elevated: #ffffff;
+  --border: #000000;
+  --text: #000000;
+  --text-muted: #1a1a1a;
+  --accent: #0000ee;
+  --accent-dim: #0000aa;
+  --danger: #b00000;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme])[data-contrast="high"] {
+    --bg: #ffffff;
+    --bg-elevated: #ffffff;
+    --border: #000000;
+    --text: #000000;
+    --text-muted: #1a1a1a;
+    --accent: #0000ee;
+    --accent-dim: #0000aa;
+    --danger: #b00000;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 *,
 *::before,
 *::after {

@@ -88,6 +88,7 @@ pub enum PttControlCmd {
     Stop(mpsc::Sender<Result<(Vec<f32>, u32), String>>),
     /// Copy current recording buffer without stopping or clearing (for live preview).
     SnapshotBuffer(mpsc::Sender<Result<(Vec<f32>, u32), String>>),
+    SnapshotTail(mpsc::Sender<Result<(Vec<f32>, u32, usize), String>>),
 }
 
 /// Handle cloned into `AppState`; all capture runs on a single background thread.
@@ -124,6 +125,13 @@ impl PttController {
                         let samples = cap.peek_buffer_f32();
                         let rate = cap.input_sample_rate;
                         let _ = reply.send(Ok((samples, rate)));
+                    }
+                    PttControlCmd::SnapshotTail(reply) => {
+                        let rate = cap.input_sample_rate;
+                        let result = cap.buffer.lock().map(|b| {
+                            (b[b.len().saturating_sub(rate as usize * 2)..].to_vec(), rate, b.len())
+                        }).map_err(|_| "microphone buffer lock poisoned".to_string());
+                        let _ = reply.send(result);
                     }
                 }
             }
@@ -176,6 +184,13 @@ impl PttController {
         reply_rx
             .recv()
             .map_err(|_| "microphone thread stopped".to_string())?
+    }
+    /// Inspect only the latest two seconds when looking for an endpoint.
+    pub fn snapshot_tail(&self) -> Result<(Vec<f32>, u32, usize), String> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.lock().map_err(|_| "microphone thread lock poisoned")?
+            .send(PttControlCmd::SnapshotTail(tx)).map_err(|_| "microphone thread stopped")?;
+        rx.recv().map_err(|_| "microphone thread stopped")?
     }
 }
 
@@ -358,7 +373,7 @@ fn build_stream_i16(
                     }
                     update_input_levels(&levels, &mono);
                     if let Ok(mut b) = buffer.lock() {
-                        b.extend_from_slice(&mono);
+                        push_interleaved_to_mono(&mut b, &mono, 1);
                     }
                 }
             },
@@ -400,7 +415,7 @@ fn build_stream_u16(
                     }
                     update_input_levels(&levels, &mono);
                     if let Ok(mut b) = buffer.lock() {
-                        b.extend_from_slice(&mono);
+                        push_interleaved_to_mono(&mut b, &mono, 1);
                     }
                 }
             },
@@ -474,7 +489,42 @@ pub fn resample_to_whisper_16k_mono(input: &[f32], from_rate: u32) -> Vec<f32> {
     outdata
 }
 
+/// Estimate a noise floor from quiet frames, bounded below the louder speech frames.
+pub fn adaptive_threshold(samples: &[f32], rate: u32, fallback: f32) -> f32 {
+    let frame = (rate as usize / 50).max(1);
+    let mut levels: Vec<f32> = samples.chunks(frame).map(|c| {
+        (c.iter().map(|x| x*x).sum::<f32>() / c.len() as f32).sqrt()
+    }).filter(|v| v.is_finite()).collect();
+    if levels.len() < 5 { return fallback; }
+    levels.sort_by(f32::total_cmp);
+    let noise = levels[levels.len() / 5];
+    let speech = levels[levels.len() * 9 / 10];
+    if speech < 0.0001 { return 0.0001; }
+    // Constant noise must not become speech solely because it was normalized.
+    if speech < noise * 1.5 { return (noise * 1.5).max(0.0001); }
+    (noise * 2.5).max(0.0001).min(speech * 0.4)
+}
+
+pub fn padded_vad_segments(samples: &[f32], threshold: f32, silence_ms: u32, rate: u32) -> Vec<(usize, usize)> {
+    let pad = rate as usize * 120 / 1000;
+    let mut result: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in vad_segments(samples, threshold, silence_ms, rate) {
+        let start = start.saturating_sub(pad);
+        let end = (end + pad).min(samples.len());
+        if let Some(last) = result.last_mut() {
+            if start <= last.1 { last.1 = last.1.max(end); continue; }
+        }
+        result.push((start, end));
+    }
+
+
+    result
+}
+
 /// Simple RMS energy gate: returns slice ranges (start sample, end exclusive) for segments above threshold.
+///
+/// Trailing silence that triggered a split is excluded from the span so mid-thought pauses are not
+/// fed to Whisper as sentence-ending gaps (those get replaced by a tiny merge pad instead).
 pub fn vad_segments(samples: &[f32], threshold: f32, min_silence_ms: u32, sample_rate: u32) -> Vec<(usize, usize)> {
     let min_silence = (sample_rate as f32 * min_silence_ms as f32 / 1000.0) as usize;
     if samples.is_empty() {
@@ -499,6 +549,7 @@ pub fn vad_segments(samples: &[f32], threshold: f32, min_silence_ms: u32, sample
                 if r < threshold {
                     silence += e - j;
                     if silence >= min_silence {
+                        j = e;
                         break;
                     }
                 } else {
@@ -506,19 +557,94 @@ pub fn vad_segments(samples: &[f32], threshold: f32, min_silence_ms: u32, sample
                 }
                 j = e;
             }
-            let seg_end = j.min(samples.len());
-            if seg_end > start {
-                segments.push((start, seg_end));
+            // Drop the silence that caused the split; keep incomplete trailing quiet at EOF.
+            // Always advance `i` to `j` after a silence split so we skip scanned quiet (setting
+            // `i` to the trimmed end alone can re-enter the same span forever).
+            if silence >= min_silence {
+                let speech_end = j.saturating_sub(silence).max(start);
+                if speech_end > start {
+                    segments.push((start, speech_end));
+                }
+                i = j.max(start + 1);
+            } else {
+                let seg_end = j.min(samples.len());
+                if seg_end > start {
+                    segments.push((start, seg_end));
+                }
+                i = seg_end.max(start + 1);
             }
-            i = seg_end;
         } else {
             i = end;
         }
     }
-    if segments.is_empty() && !samples.is_empty() {
-        segments.push((0, samples.len()));
-    }
+
     segments
+}
+
+#[cfg(test)]
+mod vad_tests {
+    use super::{vad_segments, adaptive_threshold, padded_vad_segments};
+
+    #[test]
+    fn silence_does_not_fall_back_to_full_recording() {
+        assert!(vad_segments(&vec![0.0; 16000], 0.008, 500, 16000).is_empty());
+        assert!(vad_segments(&[], 0.008, 500, 16000).is_empty());
+    }
+
+    #[test]
+    fn adaptive_gate_rejects_steady_background_noise() {
+        let noise = vec![0.003; 16000];
+        let threshold = adaptive_threshold(&noise, 16000, 0.008);
+        assert!(vad_segments(&noise, threshold, 500, 16000).is_empty());
+    }
+
+    #[test]
+    fn adaptive_gate_preserves_quiet_speech_with_edge_padding() {
+        let mut samples = vec![0.0001; 16000];
+        samples[4000..8000].fill(0.004);
+        let threshold = adaptive_threshold(&samples, 16000, 0.008);
+        assert!(threshold < 0.004);
+        let spans = padded_vad_segments(&samples, threshold, 200, 16000);
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].0 < 4000 && spans[0].1 > 8000);
+    }
+
+    #[test]
+    fn padding_never_duplicates_overlapping_audio() {
+        let mut samples = vec![0.0; 16000];
+        samples[3200..4800].fill(0.05);
+        samples[6400..8000].fill(0.05);
+        let spans = padded_vad_segments(&samples, 0.01, 80, 16000);
+        assert_eq!(spans.len(), 1);
+        assert!(spans.iter().all(|&(a,b)| a < b && b <= samples.len()));
+    }
+
+    #[test]
+    fn final_speech_frame_is_not_trimmed() {
+        let mut samples = vec![0.05; 3200];
+        samples.extend(vec![0.0; 6400]);
+        let spans = vad_segments(&samples, 0.01, 200, 16000);
+        assert_eq!(spans, vec![(0, 3200)]);
+    }
+
+    #[test]
+    fn mid_pause_silence_not_included_in_spans() {
+        let sr = 16_000u32;
+        let frame = (sr as f32 * 0.02) as usize;
+        let mut samples = vec![0.05f32; frame * 10]; // 200ms speech
+        samples.extend(std::iter::repeat(0.0).take(frame * 20)); // 400ms silence
+        samples.extend(std::iter::repeat(0.05).take(frame * 10)); // 200ms speech
+        let segs = vad_segments(&samples, 0.01, 300, sr);
+        assert_eq!(segs.len(), 2, "expected two speech spans, got {segs:?}");
+        // First span must end at/before silence start — no trailing quiet packed in.
+        let silence_start = frame * 10;
+        assert!(
+            segs[0].1 <= silence_start,
+            "trailing pause was included in span: {:?} silence_start={silence_start}",
+            segs[0]
+        );
+        assert!(segs[1].0 >= silence_start);
+    }
 }
 
 pub fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {

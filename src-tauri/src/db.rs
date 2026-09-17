@@ -101,6 +101,15 @@ fn seed_defaults(conn: &Connection) -> rusqlite::Result<()> {
         ("live_chunk_interval_ms", "2000"),
         ("live_min_audio_ms", "800"),
         ("grammar_restore", "auto"),
+        // Mic / VAD — mid-thought pauses need a longer silence split than the old 300ms default.
+        ("vad_min_silence_ms", "500"),
+        ("mic_normalize_peak", "0.88"),
+        ("mic_max_gain", "12"),
+        // Silero on short PTT clips often zeros speech; Rust energy VAD already gates.
+        ("whisper_vad_filter_pcm", "false"),
+        ("whisper_vad_filter_file", "true"),
+        ("ui_high_contrast", "false"),
+        ("whats_new_seen_version", ""),
     ] {
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",

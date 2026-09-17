@@ -18,9 +18,7 @@ Support the development of Yapper.
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/M4M21WSC82)
 
 ## Still in Progress
-- Remote server transcription still needs to be tested 
-- Tone settings need to be actually built out
-- High Contrast Mode
+- Remote server transcription still needs to be tested
 
 ## Prerequisites
 
@@ -42,7 +40,9 @@ Release installers that include **no separate Python install** use `src-tauri/re
 
 The **Parakeet** engine uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) INT8 ONNX models bundled via `sidecar/requirements.txt`. It runs on **CPU or GPU** (CUDA via ONNX Runtime when available) and includes punctuation/capitalization out of the box. Models download automatically on first use from the [sherpa-onnx asr-models release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models).
 
-**Live dictation** (Settings → Experimental) streams a HUD preview via **Moonshine v2** or **Sherpa Parakeet Unified streaming**; the pasted transcript on release still comes from the batch Whisper/Parakeet engine.
+**Background dictation** processes completed phrases while you speak and finishes the remaining audio on release. Settings includes speed/readiness presets and adaptive microphone detection; Home includes recent recordings, retry, corrections and a device benchmark. See [1.3 dictation improvements and validation](DICTATION-1.3.md).
+
+**Live dictation** (Settings → Experimental) streams a HUD preview via **Moonshine v2** or **Sherpa Parakeet Unified streaming** when background processing is disabled; the pasted transcript on release still comes from the batch Whisper/Parakeet engine.
 
 The in-app **Install GPU libraries for Whisper** action only adds libraries for faster-whisper (CTranslate2); Parakeet ONNX uses ONNX Runtime from the `sherpa-onnx` wheel.
 
@@ -149,4 +149,3 @@ Runs `scripts/bundle-windows-python-runtime.ps1` (one-time download: embeddable 
 For a quick build **without** embedding Python (dev machine only), use `npm run pack` and keep system Python + `pip install -r sidecar/requirements.txt`.
 
 **End users of a `pack:release` build:** no Python install required for local dictation or in-app Yapper Node. The first Whisper model still downloads to the app cache on use (can be large). **Visual C++ Redistributable** is usually already present on Windows; install it if import errors mention missing `VCRUNTIME`.
-

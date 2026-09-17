@@ -1,4 +1,11 @@
 name: Standard
 rules:
+  # Light cleanup only — keep Whisper’s punctuation character.
+  - pattern: '!{3,}'
+    replace: '!'
+  - pattern: '\?{3,}'
+    replace: '?'
+  - pattern: '\.{4,}'
+    replace: '...'
   - pattern: '\s+'
     replace: ' '

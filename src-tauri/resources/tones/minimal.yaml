@@ -1,6 +1,15 @@
 name: Minimal
 rules:
-  - pattern: '!'
+  # Prefer calm statement ends over excitement.
+  - pattern: '!+'
     replace: '.'
+  - pattern: '\?{2,}'
+    replace: '?'
+  - pattern: '\.{3,}'
+    replace: '.'
+  - pattern: '\s*—\s*'
+    replace: ', '
+  - pattern: '\s*…\s*'
+    replace: '. '
   - pattern: '\s+'
     replace: ' '

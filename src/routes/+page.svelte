@@ -22,6 +22,66 @@
   /** True as soon as pointer goes down — before `ptt_start` IPC returns (fixes quick-click / event order bugs). */
   let testPttArmed = $state(false);
   let testPttStartPromise: Promise<void> | null = null;
+  let dictationOutcome = $state("");
+  type DictationJob = { id: number; text: string; status: string; error: string | null; audio_seconds: number; elapsed_ms: number; app_key: string | null };
+  let jobs = $state<DictationJob[]>([]);
+  let jobError = $state("");
+  let jobNotice = $state("");
+  let jobAction = $state<number | null>(null);
+  let correctionFrom = $state("");
+  let correctionTo = $state("");
+  let correctionJob = $state<number | null>(null);
+
+  async function refreshJobs() {
+    try { jobs = await invoke<DictationJob[]>("dictation_jobs"); } catch { /* older engine */ }
+  }
+
+  async function jobCommand(id: number, command: "retry_dictation" | "discard_dictation" | "benchmark_dictation") {
+    jobAction = id;
+    jobError = "";
+    jobNotice = "";
+    try {
+      if (command === "benchmark_dictation") {
+        const result = await invoke<{ audio_seconds: number; processing_seconds: number; realtime_factor: number; recommendation: string }>(command, { id });
+        jobNotice = `${result.audio_seconds.toFixed(1)}s of audio processed in ${result.processing_seconds.toFixed(1)}s (${result.realtime_factor.toFixed(2)}× real time). ${result.recommendation} This measures speed, not accuracy; compare the transcript yourself.`;
+      } else { await invoke(command, { id }); }
+      await refreshJobs();
+    } catch (e) { jobError = String(e); }
+    finally { jobAction = null; }
+  }
+
+  async function copyJob(text: string) {
+    try { await navigator.clipboard.writeText(text); jobNotice = "Copied."; }
+    catch (e) { jobError = String(e); }
+  }
+
+  async function rememberCorrection() {
+    jobError = "";
+    const from = correctionFrom.trim();
+    const to = correctionTo.trim();
+    const original = jobs.find(j => j.id === correctionJob)?.text ?? "";
+    if (!from || !to || from === to || !original.toLowerCase().includes(from.toLowerCase())) {
+      jobError = "Enter a phrase from this transcript and a different replacement.";
+      return;
+    }
+    try {
+      const existing = await invoke<{ id: number; mishear: string; intended: string; priority: number }[]>("list_corrections_cmd");
+      const match = existing.find(c => c.mishear.toLowerCase() === from.toLowerCase());
+      await invoke("upsert_correction_cmd", { entry: { id: match?.id ?? null, mishear: from, intended: to, priority: match?.priority ?? 0 } });
+      jobNotice = "Correction saved for future dictations.";
+      correctionJob = null;
+    } catch (e) { jobError = String(e); }
+  }
+
+  async function setPasteMode(appKey: string, multiline: boolean) {
+    try {
+      await invoke("set_setting_cmd", { key: `paste_multiline_app_${appKey}`, value: String(multiline) });
+      jobNotice = multiline ? "Single-paste paragraphs enabled for this application." : "Chat-safe line breaks enabled for this application.";
+    } catch (e) { jobError = String(e); }
+  }
+
+  let showWhatsNew = $state(false);
+  const WHATS_NEW_VERSION = "1.3.0";
 
   type MicLevel = { rms: number; peak: number };
   let micLevel = $state<MicLevel>({ rms: 0, peak: 0 });
@@ -74,11 +134,19 @@
 
   onMount(() => {
     refreshStatus();
+    void refreshJobs();
     void (async () => {
       const r =
         (await invoke<string | null>("get_setting_cmd", { key: "instance_role" })) ?? "dictation";
       instanceRole = r === "network_server" ? "network_server" : "dictation";
       await refreshNodeQuick();
+      try {
+        const seen =
+          (await invoke<string | null>("get_setting_cmd", { key: "whats_new_seen_version" })) ?? "";
+        showWhatsNew = seen !== WHATS_NEW_VERSION;
+      } catch {
+        showWhatsNew = false;
+      }
     })();
     const unsubs: Array<() => void> = [];
     void listen<{ message?: string; recovering?: boolean }>("engine-crashed", async (ev) => {
@@ -115,12 +183,18 @@
     }).then((u) => unsubs.push(u));
     const id = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void refreshJobs();
       invoke<MicLevel>("get_mic_input_level")
         .then((l) => {
           micLevel = l;
         })
         .catch(() => {});
-    }, 55);
+      invoke<string>("last_dictation_outcome_cmd")
+        .then((msg) => {
+          dictationOutcome = msg ?? "";
+        })
+        .catch(() => {});
+    }, 400);
     invoke<MicLevel>("get_mic_input_level")
       .then((l) => {
         micLevel = l;
@@ -137,6 +211,17 @@
     };
   });
 
+  async function dismissWhatsNew() {
+    showWhatsNew = false;
+    try {
+      await invoke("set_setting_cmd", {
+        key: "whats_new_seen_version",
+        value: WHATS_NEW_VERSION,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
   async function startEngine() {
     lastError = null;
     starting = true;
@@ -210,7 +295,9 @@
         PTT_STOP_TIMEOUT_MS,
         "Transcription timed out after ~11 min — check the dev terminal for [yapper-sidecar] lines or a sidecar error above. Use Python 3.10–3.12 and: py -3.12 -m pip install -r sidecar/requirements.txt",
       );
-      testTranscript = text.trim() ? text : "(no speech detected)";
+      testTranscript = text.trim()
+        ? text
+        : "Hold longer — nothing transcribed. Aim for about one second of speech.";
     } catch (e) {
       testError = String(e);
     } finally {
@@ -219,7 +306,12 @@
   }
 
   async function copyTestTranscript() {
-    if (!testTranscript || testTranscript === "(no speech detected)") return;
+    if (
+      !testTranscript ||
+      testTranscript.startsWith("(no speech") ||
+      testTranscript.startsWith("Hold longer")
+    )
+      return;
     try {
       await navigator.clipboard.writeText(testTranscript);
     } catch {
@@ -229,6 +321,21 @@
 </script>
 
 <section class="hero">
+  {#if showWhatsNew}
+    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.0">
+      <div class="whats-new-head">
+        <h2 class="whats-new-title">What’s new in 1.3.0</h2>
+        <button type="button" class="btn mini" onclick={dismissWhatsNew}>Dismiss</button>
+      </div>
+      <ul class="whats-new-list">
+        <li>Smoother mid-thought pauses — fewer false periods mid-sentence</li>
+        <li>Clearer short-hold feedback on the HUD and Home</li>
+        <li>High contrast mode, richer tone styles, dictionary priority</li>
+        <li>Silero VAD off by default for live mic; fixed RTF diagnostics</li>
+      </ul>
+    </div>
+  {/if}
+
   {#if instanceRole === "network_server"}
     <div class="panel server-spotlight" role="region" aria-label="Processing server">
       <h2 class="server-spotlight-title">This PC is your processing server</h2>
@@ -335,6 +442,9 @@
         {#if engine.inference_detail}
           <p class="detail mono">{engine.inference_detail}</p>
         {/if}
+        {#if dictationOutcome}
+          <p class="detail outcome-line" role="status">{dictationOutcome}</p>
+        {/if}
       {:else}
         <p class="detail">
           {engine.message ?? "Start the engine to use push-to-talk and file transcription."}
@@ -342,6 +452,43 @@
       {/if}
     </div>
   {/if}
+
+  <div class="panel dictation-test">
+    <h2>Recent dictations</h2>
+    <p class="muted">Completed recordings expire after ten minutes; the latest five are kept in memory, with active jobs retained until they finish. Audio is not saved to disk. Retry uses the currently running engine; to try another model, change it in Settings and restart first. Retried text appears here for you to copy.</p>
+    {#if jobError}<p class="warn" role="alert">{jobError}</p>{/if}
+    {#if jobNotice}<p role="status">{jobNotice}</p>{/if}
+    {#if jobs.length === 0}<p>No recent dictations.</p>{/if}
+    {#each jobs as job (job.id)}
+      <article class="panel">
+        <p><strong>{job.status === "queued" ? "Waiting to process" : job.status === "processing" ? "Processing…" : job.status === "failed" ? "Needs a retry" : "Transcript ready"}</strong> · {job.audio_seconds.toFixed(1)}s recording{#if job.elapsed_ms > 0} · ready in {(job.elapsed_ms / 1000).toFixed(1)}s{/if}</p>
+        {#if job.error}<p class="warn">{job.error}</p>{/if}
+        {#if job.text}<p style="white-space: pre-wrap; overflow-wrap: anywhere">{job.text}</p>{/if}
+        <div class="actions">
+          <button class="btn" disabled={!job.text} onclick={() => copyJob(job.text)}>Copy</button>
+          <button class="btn" disabled={jobAction !== null || job.status === "queued" || job.status === "processing" || !engine?.ready} onclick={() => jobCommand(job.id, "retry_dictation")}>Retry recording</button>
+          <button class="btn" disabled={jobAction !== null || job.status === "queued" || job.status === "processing" || !engine?.ready} onclick={() => jobCommand(job.id, "benchmark_dictation")}>Benchmark this recording</button>
+          <button class="btn" disabled={!job.text} onclick={() => { correctionJob = job.id; correctionFrom = ""; correctionTo = ""; }}>Teach a correction</button>
+          <button class="btn" disabled={jobAction !== null || job.status === "queued" || job.status === "processing"} onclick={() => jobCommand(job.id, "discard_dictation")}>Discard</button>
+        </div>
+        {#if job.app_key}
+          <details><summary>Line breaks for this destination</summary>
+            <p>Applies to this application ({job.app_key.split(/[\\/]/).pop()}). Choose single paste for document editors; chat-safe mode uses Shift+Enter between lines.</p>
+            <button class="btn" onclick={() => setPasteMode(job.app_key!, true)}>Single paste</button>
+            <button class="btn" onclick={() => setPasteMode(job.app_key!, false)}>Chat-safe line breaks</button>
+          </details>
+        {/if}
+        {#if correctionJob === job.id}
+          <label for="correction-from">Phrase Yapper heard</label>
+          <input id="correction-from" bind:value={correctionFrom} />
+          <label for="correction-to">Use this instead</label>
+          <input id="correction-to" bind:value={correctionTo} />
+          <button class="btn" onclick={rememberCorrection}>Remember correction</button>
+          <button class="btn" onclick={() => correctionJob = null}>Cancel</button>
+        {/if}
+      </article>
+    {/each}
+  </div>
 
   <div class="panel dictation-test">
     <h2 class="test-title">Try dictation</h2>
@@ -428,6 +575,38 @@
 <style>
   .hero {
     max-width: 40rem;
+  }
+  .whats-new {
+    margin-bottom: 1.35rem;
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  }
+  .whats-new-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+  .whats-new-title {
+    margin: 0;
+    font-size: 1.05rem;
+  }
+  .whats-new-list {
+    margin: 0;
+    padding-left: 1.15rem;
+    font-size: 0.92rem;
+    color: var(--text-muted);
+  }
+  .whats-new-list li {
+    margin-bottom: 0.25rem;
+  }
+  .btn.mini {
+    padding: 0.3rem 0.65rem;
+    font-size: 0.8rem;
+  }
+  .outcome-line {
+    color: var(--accent-dim);
+    font-weight: 600;
   }
   .server-spotlight {
     margin-bottom: 1.5rem;

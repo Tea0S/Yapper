@@ -9,6 +9,8 @@
 
   let phase = $state<HudPhase>("idle");
   let preview = $state("");
+  let outcome = $state("");
+  let pending = $state(0);
   let mic = $state<MicLevel>({ rms: 0, peak: 0 });
   /** Layout/styling only — from Rust `cfg!(target_os = "macos")`, never UA sniffing. */
   let isMacChrome = $state(false);
@@ -28,6 +30,7 @@
   const expanded = $derived(phase === "listening" || phase === "transcribing");
   const hasPreview = $derived(phase === "listening" && preview.trim().length > 0);
   const previewTail = $derived(formatPreviewTail(preview, PREVIEW_TAIL_CHARS));
+  const showOutcome = $derived(phase === "idle" && outcome.trim().length > 0);
 
   function formatPreviewTail(raw: string, maxChars: number): string {
     const t = raw.replace(/\s+/g, " ").trim();
@@ -126,9 +129,13 @@
     const tick = async () => {
       if (dead) return;
       try {
-        const snap = await invoke<{ phase: HudPhase; preview: string }>("hud_snapshot");
+        const snap = await invoke<{ phase: HudPhase; preview: string; outcome?: string; pending?: number }>(
+          "hud_snapshot",
+        );
         phase = snap.phase;
         preview = snap.preview ?? "";
+        outcome = snap.outcome ?? "";
+        pending = snap.pending ?? 0;
       } catch {
         phase = "hidden";
       }
@@ -163,11 +170,14 @@
         {/if}
         <span class="tip-sub">Click to open Yapper · drag to move the widget</span>
       </div>
+      {#if showOutcome}
+        <p class="outcome" role="status" aria-live="polite">{outcome}</p>
+      {/if}
       <button
         type="button"
         class="pill"
         class:expanded
-        class:previewing={hasPreview}
+        class:previewing={hasPreview || phase === "transcribing"}
         class:macos={isMacChrome}
         aria-label="Open Yapper — or drag to move"
         onpointerdown={onPillPointerDown}
@@ -189,6 +199,8 @@
             </div>
             {#if hasPreview}
               <p class="live-preview" aria-live="polite">{previewTail}</p>
+            {:else if phase === "transcribing"}
+              <p class="live-preview finishing" aria-live="polite">{pending > 1 ? `Processing ${pending} dictations…` : "Finishing…"}</p>
             {/if}
           </div>
         {:else}
@@ -247,6 +259,38 @@
 
   .stack:hover .tooltip {
     opacity: 1;
+  }
+
+  .stack:has(.outcome) .tooltip {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .outcome {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: min(210px, 100%);
+    margin: 0;
+    padding: 8px 12px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: center;
+    color: rgba(248, 250, 252, 0.98);
+    background: rgba(12, 14, 18, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+    z-index: 11;
+    pointer-events: none;
+  }
+
+  .live-preview.finishing {
+    color: rgba(232, 180, 212, 0.95);
+    letter-spacing: 0.02em;
   }
 
   .tooltip {

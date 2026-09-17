@@ -397,6 +397,110 @@ fn normalize_after_spoken_punct(s: &str) -> String {
     collapse_comma_runs(&out)
 }
 
+/// Closed-class / clause-internal words that almost never end a sentence.
+/// A period after these is usually Whisper treating a mid-thought pause as a sentence break.
+fn word_rarely_ends_sentence(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "a" | "an"
+            | "the"
+            | "my"
+            | "your"
+            | "his"
+            | "her"
+            | "their"
+            | "our"
+            | "its"
+            | "this"
+            | "these"
+            | "those"
+            | "every"
+            | "each"
+            | "some"
+            | "any"
+            | "no"
+            | "to"
+            | "of"
+            | "for"
+            | "with"
+            | "in"
+            | "on"
+            | "at"
+            | "from"
+            | "by"
+            | "into"
+            | "onto"
+            | "about"
+            | "upon"
+            | "under"
+            | "over"
+            | "between"
+            | "among"
+            | "through"
+            | "without"
+            | "within"
+            | "across"
+            | "against"
+            | "toward"
+            | "towards"
+            | "during"
+            | "before"
+            | "after"
+            | "despite"
+            | "except"
+            | "including"
+            | "via"
+            | "per"
+            | "than"
+            | "like"
+            | "and"
+            | "or"
+            | "but"
+            | "nor"
+            | "if"
+            | "when"
+            | "while"
+            | "because"
+            | "although"
+            | "though"
+            | "whether"
+            | "unless"
+            | "until"
+            | "since"
+            | "as"
+            | "that"
+            | "which"
+            | "who"
+            | "whom"
+            | "whose"
+    )
+}
+
+fn decapitalize_word(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(c) => format!("{}{}", c.to_lowercase(), chars.as_str()),
+        None => String::new(),
+    }
+}
+
+/// Drop false sentence ends after unfinished clause words (`about the. Project` → `about the project`).
+fn soften_mid_pause_periods(s: &str) -> String {
+    let Ok(re) = Regex::new(r"\b([A-Za-z']+)\.\s+([A-Za-z][A-Za-z']*)") else {
+        return s.to_string();
+    };
+    re.replace_all(s, |caps: &Captures| {
+        let prev = caps.get(1).unwrap().as_str();
+        let next = caps.get(2).unwrap().as_str();
+        if word_rarely_ends_sentence(prev) {
+            format!("{prev} {}", decapitalize_word(next))
+        } else {
+            caps.get(0).unwrap().as_str().to_string()
+        }
+    })
+    .into_owned()
+}
+
 /// Fix collisions when spoken punctuation and Whisper both insert marks (e.g. `leave,", Kane`, `.. .`).
 pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     let mut out = collapse_comma_runs(s);
@@ -501,6 +605,7 @@ pub(crate) fn repair_asr_punctuation(s: &str) -> String {
     if let Ok(re) = Regex::new(r"[ \t\f\v]{2,}") {
         out = re.replace_all(&out, " ").into_owned();
     }
+    out = soften_mid_pause_periods(&out);
     collapse_comma_runs(&out)
 }
 
@@ -618,6 +723,7 @@ pub fn pipeline_after_restore(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     #[test]
     fn corrections_order() {
@@ -652,6 +758,14 @@ rules:
         )
         .unwrap();
         assert_eq!(apply_tone("Hi!", "minimal", &dir), "Hi.");
+    }
+
+    #[test]
+    fn bundled_tone_presets_change_output() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/tones");
+        assert_eq!(apply_tone("Wow!!!", "minimal", &dir), "Wow.");
+        assert_eq!(apply_tone("Wow!!!", "standard", &dir), "Wow!");
+        assert_eq!(apply_tone("Wait—then…go!!", "expressive", &dir), "Wait — then … go!");
     }
 
     #[test]
@@ -725,6 +839,36 @@ rules:
         ));
         assert!(!looks_underpunctuated("Hello, welcome. This is clear."));
         assert!(!looks_underpunctuated("hi"));
+    }
+
+    #[test]
+    fn soften_mid_pause_period_after_unfinished_word() {
+        assert_eq!(
+            soften_mid_pause_periods("I was thinking about the. Project today"),
+            "I was thinking about the project today"
+        );
+        assert_eq!(
+            soften_mid_pause_periods("She wanted to. Go home"),
+            "She wanted to go home"
+        );
+        // Real sentence end after a content word — keep the period.
+        assert_eq!(
+            soften_mid_pause_periods("I went home. Project started later"),
+            "I went home. Project started later"
+        );
+        // Abbreviations like Dr. should not demote.
+        assert_eq!(
+            soften_mid_pause_periods("I spoke to Dr. Smith yesterday"),
+            "I spoke to Dr. Smith yesterday"
+        );
+    }
+
+    #[test]
+    fn repair_applies_mid_pause_soften() {
+        assert_eq!(
+            repair_asr_punctuation("waiting for the. Answer"),
+            "waiting for the answer"
+        );
     }
 
     #[test]

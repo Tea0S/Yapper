@@ -149,9 +149,22 @@ impl HudCollapseAfterPtt {
 impl Drop for HudCollapseAfterPtt {
     fn drop(&mut self) {
         let state = self.app.state::<AppState>();
+        if state.ptt_session_active.load(std::sync::atomic::Ordering::SeqCst) { return; }
         if let Ok(mut g) = state.hud_phase.lock() {
             *g = HudPhase::Idle;
         }
-        let _ = set_layout(&self.app, HudLayout::Collapsed);
+        let has_outcome = state
+            .last_dictation_outcome
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|_| true))
+            .unwrap_or(false);
+        // Wider layout so the brief post-dictation tip fits above the pill.
+        let layout = if has_outcome {
+            HudLayout::Preview
+        } else {
+            HudLayout::Collapsed
+        };
+        let _ = set_layout(&self.app, layout);
     }
 }

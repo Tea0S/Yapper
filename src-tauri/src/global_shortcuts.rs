@@ -28,15 +28,7 @@ fn spawn_ptt_stop_after_pending(app: AppHandle, label: &'static str) {
                     !text.is_empty(),
                     text.len()
                 ));
-                if !text.is_empty() {
-                    // Avoid blocking the async runtime on mpsc::recv waiting for the main thread.
-                    let app_p = app.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ops = crate::paste::paste_text_at_focus_on_main_thread(&app_p, text)?;
-                        Ok::<(), String>(())
-                    })
-                    .await;
-                }
+
             }
             Err(e) => shortcut_log(format!("{label}: stop failed: {e}")),
         }

@@ -9,7 +9,9 @@
   import { bindYapperShortcuts } from "$lib/shortcuts";
   import {
     applyUiTheme,
+    loadHighContrast,
     loadUiTheme,
+    persistHighContrast,
     persistUiTheme,
     type UiTheme,
   } from "$lib/theme";
@@ -41,6 +43,7 @@
   }
 
   let uiTheme = $state<UiTheme>("system");
+  let uiHighContrast = $state(false);
   type InstanceRole = "dictation" | "network_server";
   let instanceRole = $state<InstanceRole>("dictation");
   let nodeServerBind = $state<"lan" | "loopback">("lan");
@@ -75,8 +78,31 @@
   let whisperDevice = $state("auto");
   let inputDeviceId = $state("");
   let micDevices = $state<{ id: string; label: string }[]>([]);
+  let adaptiveMicrophone = $state(true);
+  let backgroundDictation = $state(true);
+  let dictionaryHints = $state(true);
+  let presetMessage = $state("");
+  let settingsError = $state("");
+
+  function choosePreset(preset: "fast" | "balanced" | "accurate") {
+    engine = "whisper";
+    const size = preset === "fast" ? "base" : preset === "balanced" ? "small" : "medium";
+    whisperModel = appleSilicon ? `mlx-community/whisper-${size}-mlx` : size;
+    whisperBeamSize = preset === "fast" ? "1" : preset === "balanced" ? "3" : "5";
+    whisperBestOf = "1";
+    whisperPatience = "1";
+    whisperTemperature = "0";
+    computeType = "int8";
+    presetMessage = `${preset[0].toUpperCase() + preset.slice(1)} selected. Save and restart to apply; the model may need a download.`;
+  }
+
+  function chooseReadiness(ready: boolean) {
+    lazyLoadWhisper = !ready;
+    modelIdleUnloadMins = ready ? "0" : "5";
+  }
+
   let vadEnergyThreshold = $state("0.008");
-  let vadMinSilenceMs = $state("300");
+  let vadMinSilenceMs = $state("500");
   let micNormalizePeak = $state("0.88");
   let micMaxGain = $state("12");
   let lazyLoadWhisper = $state(false);
@@ -94,7 +120,7 @@
   let whisperConditionOnPrevious = $state(false);
   let whisperInitialPrompt = $state("");
   let whisperLanguage = $state("");
-  let whisperVadFilterPcm = $state(true);
+  let whisperVadFilterPcm = $state(false);
   let whisperVadFilterFile = $state(true);
 
   let liveDictationExperimental = $state(false);
@@ -188,7 +214,8 @@
 
   async function load() {
     uiTheme = await loadUiTheme();
-    applyUiTheme(uiTheme);
+    uiHighContrast = await loadHighContrast();
+    applyUiTheme(uiTheme, uiHighContrast);
     try {
       const chrome = await invoke<{ macos: boolean; appleSilicon?: boolean }>(
         "hud_chrome_info",
@@ -266,11 +293,14 @@
     }
     inputDeviceId =
       (await invoke<string | null>("get_setting_cmd", { key: "input_device_name" })) ?? "";
+    adaptiveMicrophone = (await invoke<string | null>("get_setting_cmd", { key: "adaptive_microphone" })) !== "false";
+    backgroundDictation = (await invoke<string | null>("get_setting_cmd", { key: "background_dictation" })) !== "false";
+    dictionaryHints = (await invoke<string | null>("get_setting_cmd", { key: "dictionary_recognition_hints" })) !== "false";
     vadEnergyThreshold =
       (await invoke<string | null>("get_setting_cmd", { key: "vad_energy_threshold" })) ??
       "0.008";
     vadMinSilenceMs =
-      (await invoke<string | null>("get_setting_cmd", { key: "vad_min_silence_ms" })) ?? "300";
+      (await invoke<string | null>("get_setting_cmd", { key: "vad_min_silence_ms" })) ?? "500";
     micNormalizePeak =
       (await invoke<string | null>("get_setting_cmd", { key: "mic_normalize_peak" })) ?? "0.88";
     micMaxGain =
@@ -318,8 +348,8 @@
     whisperLanguage =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_language" })) ?? "";
     whisperVadFilterPcm =
-      (await invoke<string | null>("get_setting_cmd", { key: "whisper_vad_filter_pcm" })) !==
-      "false";
+      (await invoke<string | null>("get_setting_cmd", { key: "whisper_vad_filter_pcm" })) ===
+      "true";
     whisperVadFilterFile =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_vad_filter_file" })) !==
       "false";
@@ -561,11 +591,19 @@
 
   async function changeUiTheme(mode: UiTheme) {
     uiTheme = mode;
-    applyUiTheme(mode);
+    applyUiTheme(mode, uiHighContrast);
     await persistUiTheme(mode);
   }
 
+  async function changeHighContrast(on: boolean) {
+    uiHighContrast = on;
+    applyUiTheme(uiTheme, on);
+    await persistHighContrast(on);
+  }
+
   async function saveCore() {
+    await invoke("set_setting_cmd", { key: "background_dictation", value: String(backgroundDictation) });
+    await invoke("set_setting_cmd", { key: "dictionary_recognition_hints", value: String(dictionaryHints) });
     await invoke("set_setting_cmd", {
       key: "inference_host",
       value: inferenceHost,
@@ -673,6 +711,7 @@
   }
 
   async function saveMicrophoneOnly() {
+    await invoke("set_setting_cmd", { key: "adaptive_microphone", value: String(adaptiveMicrophone) });
     await invoke("set_setting_cmd", { key: "input_device_name", value: inputDeviceId });
     await invoke("set_setting_cmd", {
       key: "vad_energy_threshold",
@@ -710,9 +749,13 @@
   }
 
   async function restartEngine() {
-    await saveCore();
-    await invoke("engine_stop");
-    await invoke("engine_start");
+    settingsError = "";
+    try {
+      await saveCore();
+      await invoke("engine_stop");
+      await invoke("engine_start");
+      presetMessage = "Settings applied. Engine ready.";
+    } catch (e) { settingsError = String(e); }
   }
 
   async function installNvidiaWhisperLibs() {
@@ -751,6 +794,14 @@
         class:active={uiTheme === "system"}
         onclick={() => changeUiTheme("system")}>Match system</button>
     </div>
+    <label class="check contrast-check">
+      <input
+        type="checkbox"
+        checked={uiHighContrast}
+        onchange={(e) => changeHighContrast(e.currentTarget.checked)}
+      />
+      High contrast (stronger borders and text)
+    </label>
   </div>
 
   <div class="panel block" id="app-updates">
@@ -937,6 +988,26 @@
         <input id="tok" type="password" bind:value={remoteToken} autocomplete="off" />
       </div>
     {/if}
+    <div class="panel">
+      <h3>Dictation speed</h3>
+      <p>Choose a Whisper starting point, then fine-tune below. Larger models use more memory and may improve accuracy.</p>
+      <div class="row">
+        <button class="btn" onclick={() => choosePreset("fast")}>Fast · base</button>
+        <button class="btn" onclick={() => choosePreset("balanced")}>Balanced · small</button>
+        <button class="btn" onclick={() => choosePreset("accurate")}>Accurate · medium</button>
+      </div>
+      {#if presetMessage}<p role="status">{presetMessage}</p>{/if}
+      {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
+      <p>Use a recent recording on Home to benchmark this setup before choosing a larger model.</p>
+      <label class="check"><input type="checkbox" bind:checked={backgroundDictation} />Process completed phrases while I speak</label>
+      <p class="field-hint">Starts after eight seconds at a natural pause. You can record the next dictation while the previous one finishes. Disable to use the experimental streaming preview instead.</p>
+      <label class="check"><input type="checkbox" bind:checked={dictionaryHints} />Help Whisper recognize my dictionary words</label>
+      <p class="field-hint">Uses up to 32 priority terms. Restart the engine after editing your dictionary to refresh recognition hints. Text corrections still apply immediately.</p>
+      <h3>Engine readiness</h3>
+      <button class="btn" onclick={() => chooseReadiness(true)}>Ready instantly</button>
+      <button class="btn" onclick={() => chooseReadiness(false)}>Save memory</button>
+      <p class="field-hint">Ready instantly loads at engine start and stays loaded. Save memory loads on demand and unloads after five idle minutes.</p>
+    </div>
     <div class="field">
       <label for="eng">Recognition engine</label>
       <select id="eng" bind:value={engine}>
@@ -1227,8 +1298,8 @@
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={whisperVadFilterPcm} />
-        Extra Silero voice detection on live mic (v6; Rust noise gate runs first — turn off if speech
-        is dropped)
+        Extra Silero voice detection on live mic (off by default — Rust noise gate already runs;
+        turn on only if you need stricter silence stripping)
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={whisperVadFilterFile} />
@@ -1381,6 +1452,8 @@
 
   <div class="panel block">
     <h2>Microphone</h2>
+    <label class="check"><input type="checkbox" bind:checked={adaptiveMicrophone} />Automatically adapt speech detection to my microphone</label>
+    <p class="field-hint">Estimates background noise for each recording and preserves a short margin around speech. Turn off to use the manual noise gate below.</p>
     <p class="muted short">Used for push-to-talk and dictation in the app. Sliders adjust sensitivity and volume shaping.</p>
     <div class="field">
       <label for="mic">Microphone</label>
@@ -1415,12 +1488,15 @@
           min="100"
           max="1200"
           step="10"
-          value={Math.round(n(vadMinSilenceMs, 300))}
+          value={Math.round(n(vadMinSilenceMs, 500))}
           oninput={(e) => (vadMinSilenceMs = e.currentTarget.value)}
         />
         <input class="slider-value" type="text" bind:value={vadMinSilenceMs} inputmode="numeric" autocomplete="off" />
       </div>
-      <p class="field-hint">Shorter breaks speech into smaller pieces; longer keeps sentences together.</p>
+      <p class="field-hint">
+        How long a pause can be before speech is split. Raise this if mid-thought pauses start new
+        sentences; lower if long holds feel sluggish to process.
+      </p>
     </div>
     <div class="field">
       <label for="peak">Recording loudness target</label>
@@ -1467,6 +1543,15 @@
         <option value="standard">Standard</option>
         <option value="expressive">Expressive</option>
       </select>
+      <p class="field-hint">
+        {#if tonePreset === "minimal"}
+          Calm output: turns excitement marks into periods and softens dashes.
+        {:else if tonePreset === "expressive"}
+          Keeps energy (! ? …) and normalizes em-dash / ellipsis spacing.
+        {:else}
+          Light cleanup only — leaves Whisper’s punctuation mostly as-is.
+        {/if}
+      </p>
     </div>
     <div class="field">
       <label for="grammar-restore">Grammar restore</label>
@@ -1695,6 +1780,9 @@
     gap: 0.5rem;
     margin-bottom: 1rem;
     font-size: 0.92rem;
+  }
+  .contrast-check {
+    margin-top: 1rem;
   }
   .keybind-row {
     display: flex;

@@ -538,7 +538,11 @@ def _w_bool(w: dict[str, Any], key: str, default: bool) -> bool:
 # sentence punctuation — often lock the whole decode into no-punct / no-caps mode
 # (especially large-v3-turbo on short PTT clips). Always seed a punctuated style anchor
 # at the *end* of the prompt (Whisper only keeps the last ~224 tokens).
-_DEFAULT_PUNCT_STYLE_PROMPT = "Hello, welcome. This is clear, punctuated English."
+# Prefer commas for brief hesitations; short period-heavy anchors made mid-thought pauses
+# start new sentences too aggressively.
+_DEFAULT_PUNCT_STYLE_PROMPT = (
+    "Hello, and welcome — this is clear, flowing English, with commas for brief pauses."
+)
 # Rough char budget so the style sentence survives truncation (~224 tokens ≈ 800 chars).
 _PROMPT_CHAR_BUDGET = 720
 
@@ -735,12 +739,14 @@ def transcribe_pcm_i16(pcm: bytes, sample_rate: int) -> tuple[str, float]:
         segments, info = MODEL.transcribe(audio, **transcribe_kw)
     dt = time.perf_counter() - t0
     text = _filtered_text_from_segments(segments, log_tag="transcribe_pcm", fallback_text=None)
-    rtf = getattr(info, "duration", 0) and (getattr(info, "duration", 1) * 0.01)
+    info_dur = float(getattr(info, "duration", 0) or 0.0)
+    audio_dur = info_dur if info_dur > 1e-6 else duration_s
+    rtf = (dt / audio_dur) if audio_dur > 1e-6 else 0.0
     vlog(
         f"transcribe_pcm: done in {dt:.2f}s text_chars={len(text)} "
-        f"info.duration={getattr(info, 'duration', None)!r}"
+        f"info.duration={getattr(info, 'duration', None)!r} rtf≈{rtf:.3f}"
     )
-    return text, float(rtf or 0.0)
+    return text, float(rtf)
 
 
 def handle_init(msg: dict) -> None:
@@ -814,6 +820,7 @@ def handle_init(msg: dict) -> None:
             emit({"type": "error", "message": f"Parakeet load failed: {e}"})
             return
         DEVICE = dev
+        warm_model()
         emit({"type": "model_state", "loaded": True})
         emit(
             {
@@ -868,6 +875,7 @@ def handle_init(msg: dict) -> None:
         emit({"type": "error", "message": f"Whisper load failed: {e}"})
         return
     DEVICE = "mlx" if USE_MLX else dev
+    warm_model()
     emit({"type": "model_state", "loaded": True})
     emit(
         {
@@ -878,6 +886,27 @@ def handle_init(msg: dict) -> None:
         }
     )
     vlog("handle_init finished (whisper path)")
+
+
+def warm_model() -> None:
+    """Pay the first decoder/kernel setup cost before reporting an eager engine ready."""
+    if MOCK:
+        return
+    try:
+        import numpy as np
+        if (CONFIG.get("engine") or "whisper").lower() == "parakeet":
+            parakeet_sherpa.transcribe_pcm_i16(bytes(32000), 16000)
+        elif USE_MLX:
+            _call_mlx_transcribe(np.zeros(16000, dtype=np.float32), for_file=False, duration_s=1.0)
+        elif MODEL is not None:
+            segments, _ = MODEL.transcribe(
+                np.zeros(16000, dtype=np.float32), language="en", beam_size=1,
+                vad_filter=False, condition_on_previous_text=False,
+            )
+            list(segments)
+    except Exception as exc:
+        # Warm-up is optional; an unsupported backend must still be usable.
+        vlog(f"Optional decoder warm-up skipped: {exc}")
 
 
 def handle_ensure_model() -> None:

@@ -23,6 +23,7 @@ pub enum HudPhase {
 }
 
 pub struct AppState {
+    pub dictation: crate::dictation::Dictation,
     pub tone_dir: PathBuf,
     pub ptt: PttController,
     /// `Arc` so commands can `clone()` the session and `.await` without holding `sidecar`'s mutex
@@ -63,11 +64,14 @@ pub struct AppState {
     pub inference_io_lock: Arc<Mutex<()>>,
     /// Background live dictation loop; aborted when dictation stops.
     pub live_loop_handle: Arc<Mutex<Option<TokioJoinHandle<()>>>>,
+    /// Brief post-dictation HUD/Home hint (empty hold, pasted chars, …). Cleared after a few seconds.
+    pub last_dictation_outcome: Arc<StdMutex<Option<(String, Instant)>>>,
 }
 
 impl AppState {
     pub fn new(tone_dir: PathBuf, ptt: PttController) -> Self {
         Self {
+            dictation: crate::dictation::Dictation::default(),
             tone_dir,
             ptt,
             sidecar: Arc::new(Mutex::new(None)),
@@ -90,6 +94,7 @@ impl AppState {
             live_stream_session_id: Arc::new(AtomicU64::new(0)),
             inference_io_lock: Arc::new(Mutex::new(())),
             live_loop_handle: Arc::new(Mutex::new(None)),
+            last_dictation_outcome: Arc::new(StdMutex::new(None)),
         }
     }
 }

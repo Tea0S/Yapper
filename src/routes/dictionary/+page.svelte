@@ -22,8 +22,10 @@
   let dTerm = $state("");
   let dRep = $state("");
   let dScope = $state("word");
+  let dPriority = $state("10");
   let cFrom = $state("");
   let cTo = $state("");
+  let cPriority = $state("20");
   let dictIoMsg = $state("");
   let dictIoErr = $state("");
   /** Merge updates matching rows; replace clears dictionary (and corrections if the file includes them). */
@@ -36,6 +38,11 @@
 
   onMount(load);
 
+  function priorityOr(raw: string, fallback: number): number {
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) ? Math.max(0, Math.min(999, n)) : fallback;
+  }
+
   async function addDict() {
     if (!dTerm.trim()) return;
     await invoke("upsert_dictionary_cmd", {
@@ -43,12 +50,13 @@
         id: null,
         term: dTerm.trim(),
         replacement: dRep.trim() || dTerm.trim(),
-        priority: 10,
+        priority: priorityOr(dPriority, 10),
         scope: dScope,
       },
     });
     dTerm = "";
     dRep = "";
+    dPriority = "10";
     await load();
   }
 
@@ -59,11 +67,12 @@
         id: null,
         mishear: cFrom.trim(),
         intended: cTo.trim() || cFrom.trim(),
-        priority: 20,
+        priority: priorityOr(cPriority, 20),
       },
     });
     cFrom = "";
     cTo = "";
+    cPriority = "20";
     await load();
   }
 
@@ -161,13 +170,18 @@
           <option value="phrase">phrase</option>
         </select>
       </div>
+      <div class="field">
+        <label for="dp">Priority</label>
+        <input id="dp" bind:value={dPriority} inputmode="numeric" autocomplete="off" />
+        <p class="field-hint">Higher runs first when several entries match (default 10).</p>
+      </div>
       <button type="button" class="btn btn-primary" onclick={addDict}>Add / update</button>
       <ul class="list">
         {#each dict as row}
           <li>
             <span
               ><strong>{row.term}</strong> → {row.replacement}
-              <small>({row.scope})</small></span>
+              <small>({row.scope}, p{row.priority})</small></span>
             {#if row.id != null}
               <button type="button" class="btn mini" onclick={() => delDict(row.id!)}>Remove</button>
             {/if}
@@ -189,11 +203,18 @@
         <label for="int">Intended</label>
         <input id="int" bind:value={cTo} placeholder="WisprFlow" />
       </div>
+      <div class="field">
+        <label for="cp">Priority</label>
+        <input id="cp" bind:value={cPriority} inputmode="numeric" autocomplete="off" />
+        <p class="field-hint">Higher runs first (default 20). Corrections apply before dictionary.</p>
+      </div>
       <button type="button" class="btn btn-primary" onclick={addCorr}>Add / update</button>
       <ul class="list">
         {#each corr as row}
           <li>
-            <span><strong>{row.mishear}</strong> → {row.intended}</span>
+            <span
+              ><strong>{row.mishear}</strong> → {row.intended}
+              <small>(p{row.priority})</small></span>
             {#if row.id != null}
               <button type="button" class="btn mini" onclick={() => delCorr(row.id!)}>Remove</button>
             {/if}
@@ -222,6 +243,12 @@
   .muted {
     color: var(--text-muted);
     font-size: 0.92rem;
+  }
+  .field-hint {
+    margin: 0.2rem 0 0;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    line-height: 1.35;
   }
   .list {
     list-style: none;

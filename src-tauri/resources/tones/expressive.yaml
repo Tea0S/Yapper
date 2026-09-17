@@ -1,6 +1,17 @@
 name: Expressive
 rules:
+  # Keep energy marks; normalize dash / ellipsis spacing.
+  - pattern: '\s*—\s*'
+    replace: ' — '
+  - pattern: '\s*–\s*'
+    replace: ' — '
+  - pattern: '\s*\.\.\.\s*'
+    replace: ' … '
+  - pattern: '\s*…\s*'
+    replace: ' … '
+  - pattern: '!{2,}'
+    replace: '!'
+  - pattern: '\?{2,}'
+    replace: '?'
   - pattern: '\s+'
     replace: ' '
-  - pattern: '(\w+)\s*—\s*'
-    replace: '$1 — '

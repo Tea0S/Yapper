@@ -2,6 +2,98 @@ use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::sync::mpsc;
 
+#[derive(Clone)]
+pub struct PasteTarget {
+    pub window: isize,
+    pub control: isize,
+    pub app_key: String,
+    pub element: Option<Vec<i32>>,
+}
+
+#[cfg(windows)]
+fn focused_element_id() -> Option<Vec<i32>> {
+    use windows::Win32::{System::{Com::*, Ole::*}, UI::Accessibility::*};
+    use windows::core::Interface;
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| {
+            let automation: IUIAutomation = CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER).ok()?;
+            if let Ok(timed) = automation.cast::<IUIAutomation2>() {
+                let _ = timed.SetConnectionTimeout(300);
+                let _ = timed.SetTransactionTimeout(300);
+            }
+            let element = automation.GetFocusedElement().ok()?;
+            let array = element.GetRuntimeId().ok()?;
+            if array.is_null() { return None; }
+            let result = (|| {
+                let lo = SafeArrayGetLBound(array, 1).ok()?;
+                let hi = SafeArrayGetUBound(array, 1).ok()?;
+                if hi < lo || hi as i64 - lo as i64 > 128 { return None; }
+                let mut ids = Vec::new();
+                for i in lo..=hi {
+                    let mut id: i32 = 0;
+                    SafeArrayGetElement(array, &i, (&mut id as *mut i32).cast()).ok()?;
+                    ids.push(id);
+                }
+                Some(ids)
+            })();
+            let _ = SafeArrayDestroy(array);
+            result
+        })();
+        if initialized { CoUninitialize(); }
+        result
+    }
+}
+
+pub fn capture_target() -> Option<PasteTarget> {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO};
+        use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_NAME_WIN32};
+        use windows::Win32::Foundation::CloseHandle;
+        let window = GetForegroundWindow();
+        let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        if window.0.is_null() || GetGUIThreadInfo(0, &mut info).is_err() { return None; }
+        let mut pid = 0;
+        GetWindowThreadProcessId(window, Some(&mut pid));
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut path = [0u16; 32768];
+        let mut len = path.len() as u32;
+        let found = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, windows::core::PWSTR(path.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(process);
+        found.ok()?;
+        let app_key = String::from_utf16_lossy(&path[..len as usize]).to_lowercase();
+        return Some(PasteTarget { window: window.0 as isize, control: info.hwndFocus.0 as isize, app_key, element: focused_element_id() });
+    }
+    #[cfg(not(windows))]
+    { None }
+}
+
+/// Validate immediately before insertion on the main thread. Never steal focus.
+pub fn paste_to_target(app: &tauri::AppHandle, target: PasteTarget, text: String) -> Result<(), String> {
+    let conn = crate::open_db(app)?;
+    let key = format!("paste_multiline_app_{}", target.app_key);
+    let multiline = crate::db::get_setting(&conn, &key).map_err(|e| e.to_string())?.as_deref() == Some("true");
+    let (tx, rx) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        let result = (|| {
+            let current = capture_target().ok_or("Destination is unavailable. Copy the transcript from Home.")?;
+            if current.window != target.window || current.control != target.control || current.app_key != target.app_key
+                || target.element.is_none() || current.element != target.element {
+                return Err("Destination changed. Copy the transcript from Home.".to_string());
+            }
+            if multiline && !text_has_spoken_key_sentinels(&text) {
+                let mut cb = Clipboard::new().map_err(|e| e.to_string())?;
+                let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+                paste_clipboard_chunk(&mut cb, &mut enigo, &text)?;
+            } else { paste_text_at_focus(&text)?; }
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    }).map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())?
+}
+
 fn text_has_spoken_key_sentinels(s: &str) -> bool {
     s.chars().any(|c| sentinel_to_key(c).is_some())
 }

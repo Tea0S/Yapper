@@ -12,18 +12,30 @@ function isHudRoute(): boolean {
  * Match app shell to theme immediately (avoids white flash on load / theme toggle).
  * See PR #1 commit dcd7c53 — inline `app.html` defaults + native window color + body fill.
  */
-export function applyUiTheme(mode: UiTheme) {
+export function applyUiTheme(mode: UiTheme, highContrast = false) {
   const root = document.documentElement;
   if (mode === "system") {
     root.removeAttribute("data-theme");
   } else {
     root.setAttribute("data-theme", mode);
   }
+  if (highContrast) {
+    root.setAttribute("data-contrast", "high");
+  } else {
+    root.removeAttribute("data-contrast");
+  }
   const resolved = resolveUiTheme(mode);
   root.style.colorScheme = resolved;
   if (!isHudRoute()) {
-    document.body.style.backgroundColor = resolved === "light" ? "#f4f2ee" : "#0e1114";
-    void syncWindowBackground(resolved);
+    const bg = highContrast
+      ? resolved === "light"
+        ? "#ffffff"
+        : "#000000"
+      : resolved === "light"
+        ? "#f4f2ee"
+        : "#0e1114";
+    document.body.style.backgroundColor = bg;
+    void syncWindowBackground(resolved, highContrast);
   }
   void syncNativeTheme(mode);
 }
@@ -48,9 +60,16 @@ async function syncNativeTheme(mode: UiTheme) {
   }
 }
 
-async function syncWindowBackground(mode: "light" | "dark") {
+async function syncWindowBackground(mode: "light" | "dark", highContrast: boolean) {
   try {
-    await getCurrentWindow().setBackgroundColor(mode === "light" ? "#f4f2ee" : "#0e1114");
+    const color = highContrast
+      ? mode === "light"
+        ? "#ffffff"
+        : "#000000"
+      : mode === "light"
+        ? "#f4f2ee"
+        : "#0e1114";
+    await getCurrentWindow().setBackgroundColor(color);
   } catch {
     /* Browser without Tauri or unsupported platform */
   }
@@ -66,9 +85,28 @@ export async function loadUiTheme(): Promise<UiTheme> {
   return "system";
 }
 
+export async function loadHighContrast(): Promise<boolean> {
+  try {
+    return (await invoke<string | null>("get_setting_cmd", { key: "ui_high_contrast" })) === "true";
+  } catch {
+    return false;
+  }
+}
+
 export async function persistUiTheme(mode: UiTheme) {
   try {
     await invoke("set_setting_cmd", { key: "ui_theme", value: mode });
+  } catch {
+    /* Browser without Tauri */
+  }
+}
+
+export async function persistHighContrast(on: boolean) {
+  try {
+    await invoke("set_setting_cmd", {
+      key: "ui_high_contrast",
+      value: on ? "true" : "false",
+    });
   } catch {
     /* Browser without Tauri */
   }
