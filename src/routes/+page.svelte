@@ -81,7 +81,7 @@
   }
 
   let showWhatsNew = $state(false);
-  const WHATS_NEW_VERSION = "1.3.0";
+  const WHATS_NEW_VERSION = "1.3.1";
 
   type MicLevel = { rms: number; peak: number };
   let micLevel = $state<MicLevel>({ rms: 0, peak: 0 });
@@ -150,6 +150,7 @@
     })();
     const unsubs: Array<() => void> = [];
     void listen<{ message?: string; recovering?: boolean }>("engine-crashed", async (ev) => {
+      starting = Boolean(ev.payload?.recovering);
       try {
         engine = await invoke<EngineState>("engine_status");
       } catch {
@@ -160,16 +161,15 @@
         ? `${msg} Restarting automatically…`
         : msg;
     }).then((u) => unsubs.push(u));
-    void listen<{ attempt?: number }>("engine-auto-restart", async () => {
-      try {
-        const next = await invoke<EngineState>("engine_start");
-        engine = next;
-        lastError = null;
-      } catch (e) {
-        lastError = String(e);
-      }
+    void listen<{ attempt?: number }>("engine-auto-restart", () => {
+      // Rust owns recovery, including when Home is not mounted. Never launch a
+      // second engine from this notification while the watchdog is loading one.
+      starting = true;
+      lastError = null;
+      engine = { ready: false, mode: "local", message: "Restarting inference engine…" };
     }).then((u) => unsubs.push(u));
     void listen<{ message?: string }>("engine-recovered", async (ev) => {
+      starting = false;
       lastError = null;
       try {
         engine = await invoke<EngineState>("engine_status");
@@ -322,16 +322,15 @@
 
 <section class="hero">
   {#if showWhatsNew}
-    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.0">
+    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.1">
       <div class="whats-new-head">
-        <h2 class="whats-new-title">What’s new in 1.3.0</h2>
+        <h2 class="whats-new-title">What’s new in 1.3.1</h2>
         <button type="button" class="btn mini" onclick={dismissWhatsNew}>Dismiss</button>
       </div>
       <ul class="whats-new-list">
-        <li>Smoother mid-thought pauses — fewer false periods mid-sentence</li>
-        <li>Clearer short-hold feedback on the HUD and Home</li>
-        <li>High contrast mode, richer tone styles, dictionary priority</li>
-        <li>Silero VAD off by default for live mic; fixed RTF diagnostics</li>
+        <li>Fixed competing engine restarts after an inference crash</li>
+        <li>Failed startup no longer leaves the recording controls blocked</li>
+        <li>Clearer decoder errors and recovery status</li>
       </ul>
     </div>
   {/if}

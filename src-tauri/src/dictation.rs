@@ -68,6 +68,11 @@ pub fn enabled(app: &tauri::AppHandle, key: &str, default: bool) -> bool {
 
 pub async fn start(app: &tauri::AppHandle, state: &AppState, insert: bool) -> Result<(), String> {
     let mut capture = state.dictation.capture.lock().await;
+    let _engine = state.engine_lifecycle.try_lock()
+        .map_err(|_| "The engine is starting or stopping. Wait until it is ready.".to_string())?;
+    // Holding capture now prevents an engine transition. Do not make an ordinary
+    // microphone start appear as an engine transition to status readers.
+    drop(_engine);
     if capture.is_some() {
         return Err("Already recording".into());
     }

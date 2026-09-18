@@ -661,21 +661,15 @@ async fn ensure_local_model_loaded(_app: &tauri::AppHandle, state: &AppState) ->
         return Ok(());
     }
     ptt_log("ensure_model: sending EnsureModel to sidecar");
-    {
-        let side = state.sidecar.lock().await.clone();
-        let Some(side) = side else {
-            return Err("Engine not started".into());
-        };
-        side.send(&SidecarIn::EnsureModel).await?;
-    }
+    let side = state.sidecar.lock().await.clone().ok_or("Engine not started")?;
+    if !side.is_alive() { return Err(side.exit_error("while loading the model").await); }
+    side.send(&SidecarIn::EnsureModel).await?;
 
     // 720 × 500ms = 6 min — first Hugging Face download can be large/slow on slow links.
     for round in 0..720 {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let drained = match state.sidecar.lock().await.clone() {
-            Some(side) => side.take_model_load_events().await,
-            None => return Err("Engine stopped".into()),
-        };
+        if !side.is_alive() { return Err(side.exit_error("while loading the model").await); }
+        let drained = side.take_model_load_events().await;
         if !drained.is_empty() {
             ptt_log(format!(
                 "ensure_model: round {} drained {} msg(s): {}",
@@ -718,6 +712,7 @@ async fn sidecar_watchdog(app: tauri::AppHandle, run_id: u64) {
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let state = app.state::<AppState>();
+        let Ok(_engine) = state.engine_lifecycle.try_lock() else { continue; };
         if state.idle_run_id.load(Ordering::SeqCst) != run_id {
             return;
         }
@@ -741,25 +736,44 @@ async fn sidecar_watchdog(app: tauri::AppHandle, run_id: u64) {
                 "recovering": true,
             }),
         );
-        // Auto-respawn: emit for any open UI; also invoke engine_start from Rust on a
-        // blocking-friendly path so recovery works even when Home isn't mounted.
+        // Rust alone owns restart. UI events report progress; they must not start
+        // another process while this attempt is loading.
         let app_restart = app.clone();
-        let expected_run = run_id;
+        let mut expected_run = run_id;
         std::thread::spawn(move || {
+            let mut last_error = String::new();
             for attempt in 1u32..=3 {
                 std::thread::sleep(Duration::from_millis(800 * attempt as u64));
                 let app_restart = app_restart.clone();
-                let ok = tauri::async_runtime::block_on(async move {
+                let (ok, next_run, error) = tauri::async_runtime::block_on(async move {
                     let state = app_restart.state::<AppState>();
                     if state.idle_run_id.load(Ordering::SeqCst) != expected_run {
-                        return true; // superseded
+                        return (true, expected_run, String::new()); // superseded
                     }
                     let alive = {
                         let g = state.sidecar.lock().await;
                         g.as_ref().is_some_and(|s| s.is_alive())
                     };
                     if alive {
-                        return true;
+                        return (true, expected_run, String::new());
+                    }
+                    // Give a failed job time to release its work guard and let an
+                    // active recording finish; a busy guard is not a failed restart.
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    loop {
+                        if state.idle_run_id.load(Ordering::SeqCst) != expected_run {
+                            return (true, expected_run, String::new());
+                        }
+                        let capture_idle = state.dictation.capture.try_lock().map(|c| c.is_none()).unwrap_or(false);
+                        if capture_idle && !dictation::busy(&state).await { break; }
+                        if Instant::now() >= deadline { return (false, expected_run, "Finish the active recording before restarting.".into()); }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    let Ok(_engine) = state.engine_lifecycle.try_lock() else {
+                        return (false, expected_run, "An engine transition is already in progress.".into());
+                    };
+                    if state.idle_run_id.load(Ordering::SeqCst) != expected_run {
+                        return (true, expected_run, String::new());
                     }
                     ptt_log(format!(
                         "sidecar_watchdog: auto-restart attempt {attempt}"
@@ -768,24 +782,33 @@ async fn sidecar_watchdog(app: tauri::AppHandle, run_id: u64) {
                         "engine-auto-restart",
                         serde_json::json!({ "attempt": attempt }),
                     );
-                    // Call the same command path the UI uses (via AppHandle + State).
-                    drop(state);
-                    match engine_start(app_restart.clone(), app_restart.state()).await {
+                    // Keep ownership through reading the attempt's generation so an
+                    // explicit user stop cannot be adopted as another recovery attempt.
+                    match engine_start_inner(&app_restart, &state).await {
                         Ok(st) if st.ready => {
+                            // Home queries status in response; publish only after
+                            // the transition guard is released so it sees Ready.
+                            drop(_engine);
                             let _ = app_restart.emit(
                                 "engine-recovered",
                                 serde_json::json!({
                                     "message": "Inference engine restarted automatically."
                                 }),
                             );
-                            true
+                            (true, expected_run, String::new())
                         }
-                        _ => {
-                            ptt_log("sidecar_watchdog: auto-restart failed");
-                            false
+                        result => {
+                            let reason = result.err().unwrap_or_else(|| "Engine did not become ready".into());
+                            ptt_log(format!("sidecar_watchdog: auto-restart failed: {reason}"));
+                            // engine_start advances the generation even when loading fails.
+                            // Continue retries for our new generation instead of treating
+                            // our own failed attempt as an external stop/restart.
+                            (false, state.idle_run_id.load(Ordering::SeqCst), reason)
                         }
                     }
                 });
+                expected_run = next_run;
+                if !error.is_empty() { last_error = error; }
                 if ok {
                     return;
                 }
@@ -793,7 +816,7 @@ async fn sidecar_watchdog(app: tauri::AppHandle, run_id: u64) {
             let _ = app_restart.emit(
                 "engine-crashed",
                 serde_json::json!({
-                    "message": "Inference engine crashed repeatedly — start it again from Home.",
+                    "message": format!("Could not restart the inference engine. {last_error}"),
                     "recovering": false,
                 }),
             );
@@ -1176,6 +1199,9 @@ fn get_mic_input_level(state: State<'_, AppState>) -> InputLevelState {
 
 #[tauri::command]
 async fn engine_status(state: State<'_, AppState>) -> Result<EngineStatus, String> {
+    if state.engine_lifecycle.try_lock().is_err() {
+        return Ok(EngineStatus { ready: false, mode: "starting".into(), message: Some("Engine is starting or stopping — please wait.".into()), inference_detail: None });
+    }
     let detail = state.inference_line.lock().await.clone();
     {
         let side = state.sidecar.lock().await;
@@ -1211,9 +1237,15 @@ async fn engine_status(state: State<'_, AppState>) -> Result<EngineStatus, Strin
 
 #[tauri::command]
 async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<EngineStatus, String> {
+    let _engine = state.engine_lifecycle.try_lock().map_err(|_| "The engine is already starting or stopping. Please wait.".to_string())?;
+    engine_start_inner(&app, &state).await
+}
+
+async fn engine_start_inner(app: &tauri::AppHandle, state: &AppState) -> Result<EngineStatus, String> {
     let _capture = state.dictation.capture.try_lock().map_err(|_| "Recording is stopping. Try again shortly.".to_string())?;
     if _capture.is_some() { return Err("Finish recording before restarting the engine".into()); }
     let _jobs = state.dictation.work.try_lock().map_err(|_| "Wait for dictation processing to finish before restarting the engine".to_string())?;
+    drop(_capture);
     let conn = open_db(&app)?;
     let host = get_setting(&conn, "inference_host")
         .map_err(|e| e.to_string())?
@@ -1355,31 +1387,15 @@ async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         })
         .await?;
 
-    *state.sidecar.lock().await = Some(Arc::new(session));
+    let session = Arc::new(session);
+    *state.sidecar.lock().await = Some(session.clone());
 
-    // Python processes `init` synchronously: while `load_whisper` runs it does not read stdin.
-    // If we return "engine ready" early, the next `Chunk` write can fill the stdin pipe and block forever.
-    const INIT_WAIT: Duration = Duration::from_secs(1800);
-    let init_deadline = Instant::now() + INIT_WAIT;
-    loop {
-        if Instant::now() > init_deadline {
-            *state.sidecar.lock().await = None;
-            return Err(
-                "Sidecar init timed out after 30 minutes (model download or GPU load stuck?).".into(),
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let s = state.sidecar.lock().await.clone();
-        let Some(side) = s else {
-            return Err("Engine stopped during init".into());
-        };
-        if let Some(e) = side.take_first_error().await {
-            *state.sidecar.lock().await = None;
-            return Err(e);
-        }
-        if side.has_ready_event().await {
-            break;
-        }
+    // A dead process can never emit Ready. Fail promptly and release lifecycle/work
+    // guards rather than waiting thirty minutes with the capture gate held.
+    if let Err(error) = session.wait_ready(Duration::from_secs(1800)).await {
+        *state.sidecar.lock().await = None;
+        state.local_model_in_memory.store(false, Ordering::SeqCst);
+        return Err(error);
     }
 
     poll_local_ready_metadata(&state).await;
@@ -1409,6 +1425,7 @@ async fn engine_start(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
 
 #[tauri::command]
 async fn engine_stop(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let _engine = state.engine_lifecycle.try_lock().map_err(|_| "The engine is already starting or stopping. Please wait.".to_string())?;
     let _capture = state.dictation.capture.try_lock().map_err(|_| "Recording is stopping. Try again shortly.".to_string())?;
     if _capture.is_some() { return Err("Finish recording before stopping the engine".into()); }
     let _jobs = state.dictation.work.try_lock().map_err(|_| "Wait for processing to finish before stopping the engine".to_string())?;
@@ -1471,10 +1488,7 @@ async fn wait_ptt_chunk_transcript(
 
         let raw = if let Some(side) = local_sidecar.as_ref() {
             if !side.is_alive() {
-                return Err(
-                    "The inference process exited while transcribing. Yapper will try to restart it — retry push-to-talk."
-                        .into(),
-                );
+                return Err(format!("{}\nYour recording is available in Home. Once the engine is ready, choose Retry recording.", side.exit_error("while transcribing").await));
             }
             side.pop_transcript_for_seq(seq).await?
         } else if let Some(rem) = state.remote.lock().await.as_ref() {

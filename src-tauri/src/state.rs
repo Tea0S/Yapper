@@ -24,6 +24,8 @@ pub enum HudPhase {
 
 pub struct AppState {
     pub dictation: crate::dictation::Dictation,
+    /// Engine transitions must not be mistaken for microphone transitions.
+    pub engine_lifecycle: Mutex<()>,
     pub tone_dir: PathBuf,
     pub ptt: PttController,
     /// `Arc` so commands can `clone()` the session and `.await` without holding `sidecar`'s mutex
@@ -72,6 +74,7 @@ impl AppState {
     pub fn new(tone_dir: PathBuf, ptt: PttController) -> Self {
         Self {
             dictation: crate::dictation::Dictation::default(),
+            engine_lifecycle: Mutex::new(()),
             tone_dir,
             ptt,
             sidecar: Arc::new(Mutex::new(None)),

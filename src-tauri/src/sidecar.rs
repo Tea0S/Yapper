@@ -436,6 +436,8 @@ pub struct SidecarSession {
     pub pending: Arc<Mutex<VecDeque<SidecarOut>>>,
     /// Cleared when the stdout reader exits (process died / pipe closed).
     pub alive: Arc<AtomicBool>,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    stderr_closed: Arc<tokio::sync::Notify>,
 }
 
 impl SidecarSession {
@@ -563,11 +565,19 @@ impl SidecarSession {
             alive_reader.store(false, Ordering::SeqCst);
             eprintln!("[yapper-sidecar] stdout closed — inference process exited");
         });
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        let stderr_lines = stderr_tail.clone();
+        let stderr_closed = Arc::new(tokio::sync::Notify::new());
+        let stderr_done = stderr_closed.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 eprintln!("[yapper-sidecar] {line}");
+                let mut tail = stderr_lines.lock().await;
+                if tail.len() == 8 { tail.pop_front(); }
+                tail.push_back(line.chars().take(600).collect());
             }
+            stderr_done.notify_one();
         });
 
         Ok(Self {
@@ -575,7 +585,34 @@ impl SidecarSession {
             writer: Arc::new(Mutex::new(stdin)),
             pending,
             alive,
+            stderr_tail,
+            stderr_closed,
         })
+    }
+
+    pub async fn exit_error(&self, context: &str) -> String {
+        // stdout and stderr readers finish independently; allow stderr to drain.
+        let _ = tokio::time::timeout(Duration::from_millis(100), self.stderr_closed.notified()).await;
+        let tail = self.stderr_tail.lock().await;
+        let detail = tail.iter().rev().take(3).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+        if detail.is_empty() {
+            format!("The inference process exited {context}. No error details were reported.")
+        } else {
+            format!("The inference process exited {context}.\n{detail}")
+        }
+    }
+
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(error) = self.take_first_error().await { return Err(error); }
+            if !self.is_alive() { return Err(self.exit_error("during startup").await); }
+            if self.has_ready_event().await { return Ok(()); }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("Sidecar init timed out (model download or GPU load stuck?).".into());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     fn map_pipe_write_err(e: io::Error) -> String {
@@ -781,4 +818,54 @@ fn system_python_fallback() -> String {
         }
     }
     "python".to_string()
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    static NEXT_SCRIPT: AtomicU64 = AtomicU64::new(0);
+    struct Script(PathBuf);
+    impl Script {
+        fn new(body: &str) -> Self {
+            let id = NEXT_SCRIPT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("yapper-startup-{}-{id}.py", std::process::id()));
+            std::fs::write(&path, body).unwrap();
+            Self(path)
+        }
+        async fn spawn(&self) -> SidecarSession {
+            let python = std::env::var("YAPPER_TEST_PYTHON").unwrap_or_else(|_| "python".into());
+            SidecarSession::spawn(&python, self.0.clone(), None).await.unwrap()
+        }
+    }
+    impl Drop for Script {
+        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+    }
+
+    #[tokio::test]
+    async fn exited_process_fails_startup_promptly_with_decoder_error() {
+        let script = Script::new("import sys\nsys.stderr.write('decoder failed to initialize\\n')\nsys.stderr.flush()\nsys.exit(17)\n");
+        let side = script.spawn().await;
+        let error = tokio::time::timeout(Duration::from_secs(5), side.wait_ready(Duration::from_secs(1800)))
+            .await.expect("startup must not wait thirty minutes for a dead process").unwrap_err();
+        assert!(error.contains("during startup"), "{error}");
+        assert!(error.contains("decoder failed to initialize"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn ready_process_remains_usable() {
+        let script = Script::new("import time\nprint('{\"type\":\"ready\",\"engines\":[]}', flush=True)\ntime.sleep(10)\n");
+        let side = script.spawn().await;
+        side.wait_ready(Duration::from_secs(5)).await.unwrap();
+        assert!(side.is_alive());
+        assert!(side.has_ready_event().await);
+    }
+
+    #[tokio::test]
+    async fn explicit_initialization_error_is_preserved() {
+        let script = Script::new("import time\nprint('{\"type\":\"error\",\"message\":\"model unavailable\"}', flush=True)\ntime.sleep(10)\n");
+        let side = script.spawn().await;
+        assert_eq!(side.wait_ready(Duration::from_secs(5)).await.unwrap_err(), "model unavailable");
+    }
 }
