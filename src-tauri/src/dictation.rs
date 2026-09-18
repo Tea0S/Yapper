@@ -90,6 +90,9 @@ pub async fn start(app: &tauri::AppHandle, state: &AppState, insert: bool) -> Re
             );
         }
     }
+    let pause_ms = crate::open_db(app).ok()
+        .and_then(|c| db::get_setting(&c, "vad_min_silence_ms").ok().flatten())
+        .and_then(|v| v.parse::<usize>().ok()).unwrap_or(500).clamp(750, 3000);
     let target_task = insert.then(|| tokio::task::spawn_blocking(paste::capture_target));
     crate::start_capture(app, state).await?;
     // Capture destination identity concurrently so UI Automation cannot delay mic opening.
@@ -98,7 +101,7 @@ pub async fn start(app: &tauri::AppHandle, state: &AppState, insert: bool) -> Re
         None => None,
     };
     let stop = Arc::new(AtomicBool::new(false));
-    let progress = if enabled(app, "background_dictation", true) {
+    let progress = if enabled(app, "background_dictation", true) && !enabled(app, "live_dictation_experimental", false) {
         let app = app.clone();
         let stop = stop.clone();
         Some(tokio::spawn(async move {
@@ -125,7 +128,8 @@ pub async fn start(app: &tauri::AppHandle, state: &AppState, insert: bool) -> Re
                 let tail = &recent;
                 // Commit only at a sustained pause after at least eight seconds. The pause
                 // remains in the next slice, preserving soft consonants at either boundary.
-                let quiet = rate as usize * 3 / 4;
+                let quiet = rate as usize * pause_ms / 1000;
+                if tail.len() < quiet { continue; }
                 let threshold = audio::adaptive_threshold(tail, rate, 0.008).min(0.008);
                 let rms = (tail[tail.len() - quiet..]
                     .iter()
@@ -215,6 +219,8 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
         }
     }
     let (samples, rate) = result?;
+    crate::hud::sound_cue(app, 660);
+    let mic_error = state.ptt.status.lock().ok().map(|s| s.error.clone()).unwrap_or_default();
     crate::abort_live_preview_task(state).await;
     crate::end_live_stream(app, state).await;
     *state.live_hud_preview.lock().await = String::new();
@@ -289,6 +295,11 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
         Ok(tail) => {
             append_text(&mut text, &tail);
             complete(app, state, id, &text, started).await;
+            if !mic_error.is_empty() {
+                set_status(state, id, "ready", Some(mic_error)).await;
+                crate::set_dictation_outcome(state, "Microphone interrupted - captured text is on Home");
+                return Ok(text);
+            }
             if !text.is_empty() {
                 if let Some(target) = capture.target {
                     let app_copy = app.clone();
@@ -305,6 +316,7 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
                         );
                     } else {
                         crate::set_dictation_outcome(state, "Dictation pasted");
+                        crate::hud::sound_cue(app, 1100);
                     }
                 } else if capture.insert {
                     #[cfg(windows)]
@@ -339,6 +351,7 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
             Ok(text)
         }
         Err(error) => {
+            crate::hud::sound_cue(app, 220);
             set_status(state, id, "failed", Some(error.clone())).await;
             crate::set_dictation_outcome(state, "Dictation saved temporarily — retry from Home");
             Err(error)

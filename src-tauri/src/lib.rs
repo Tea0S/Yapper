@@ -326,6 +326,7 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
         return;
     }
 
+    *state.live_preview_status.lock().await = "Preparing live preview; the first use may download a model...".into();
     if let Err(e) = send_sidecar_msg(
         &state,
         SidecarIn::StartStream {
@@ -336,14 +337,17 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
     )
     .await
     {
+        *state.live_preview_status.lock().await = format!("Preview unavailable: {e}. Final transcription is still available.");
         ptt_log(format!("live_dictation: start_stream: {e}"));
         return;
     }
     if let Err(e) = wait_stream_started(&state, session_id).await {
+        *state.live_preview_status.lock().await = format!("Preview unavailable: {e}. Final transcription is still available.");
         ptt_log(format!("live_dictation: wait stream_started: {e}"));
         return;
     }
 
+    *state.live_preview_status.lock().await = "Listening for preview...".into();
     let mut first_tick = true;
     loop {
         let interval_ms: u64 = {
@@ -431,9 +435,6 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
             .unwrap_or(12.0)
             .clamp(1.0, 48.0);
         let delta = condition_speech_signal(&delta, mic_peak, mic_max_gain);
-        state
-            .live_audio_cursor
-            .store(samples.len() as u32, Ordering::SeqCst);
         let pcm16k = resample_to_whisper_16k_mono(&delta, rate);
         if pcm16k.is_empty() {
             continue;
@@ -457,11 +458,15 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
         .await
         {
             ptt_log(format!("live_dictation: feed_audio: {e}"));
-            continue;
+            *state.live_preview_status.lock().await = "Preview interrupted. Final transcription is still available.".into();
+            break;
         }
+        // Never advance until FeedAudio was actually sent; a busy lock must not discard speech.
+        state.live_audio_cursor.store(samples.len() as u32, Ordering::SeqCst);
 
         tokio::time::sleep(Duration::from_millis(30)).await;
-        if let Ok(Some((text, is_final))) = {
+        for _ in 0..256 {
+        let result = {
             let local_side = state.sidecar.lock().await.clone();
             if let Some(side) = local_side {
                 side.pop_stream_for_session(session_id).await
@@ -471,10 +476,19 @@ async fn live_streaming_loop(app: tauri::AppHandle) {
             } else {
                 Ok(None)
             }
-        } {
-            if !text.trim().is_empty() && !is_final {
+        };
+        match result {
+            Ok(Some((text, _))) if !text.trim().is_empty() => {
+                *state.live_preview_status.lock().await = String::new();
                 update_live_hud_preview(&app, &state, text).await;
             }
+            Ok(Some(_)) => {},
+            Ok(None) => break,
+            Err(error) => {
+                *state.live_preview_status.lock().await = format!("Preview unavailable: {error}");
+                return;
+            }
+        }
         }
     }
 }
@@ -486,7 +500,7 @@ async fn end_live_stream(app: &tauri::AppHandle, state: &AppState) {
         Ok(c) => c,
         Err(_) => return,
     };
-    if !live_preview_wanted(&conn) || dictation::enabled(app, "background_dictation", true) {
+    if !live_preview_wanted(&conn) {
         return;
     }
     let session_id = state.live_stream_session_id.swap(0, Ordering::SeqCst);
@@ -1534,7 +1548,8 @@ pub(crate) async fn ptt_start_inner(app: &tauri::AppHandle, state: &AppState) ->
 async fn start_capture(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
     ptt_log("ptt_start: begin");
     state.live_audio_cursor.store(0, Ordering::SeqCst);
-    let session_id = next_seq(&state.seq);
+    // Zero means no live session. The global sequence starts at zero.
+    let session_id = state::next_stream_seq(&state.seq);
     state
         .live_stream_session_id
         .store(session_id, Ordering::SeqCst);
@@ -1545,13 +1560,15 @@ async fn start_capture(app: &tauri::AppHandle, state: &AppState) -> Result<(), S
         .map_err(|e| e.to_string())?
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let fallback = dictation::enabled(app, "microphone_auto_fallback", true);
     let ptt = state.ptt.clone();
-    tokio::task::spawn_blocking(move || ptt.start(device_name))
+    tokio::task::spawn_blocking(move || ptt.start(device_name, fallback))
         .await
         .map_err(|e| e.to_string())??;
     state.ptt_session_active.store(true, Ordering::SeqCst);
     touch_model_activity(state);
     ptt_log("ptt_start: capture started");
+    hud::sound_cue(app, 880);
     {
         let mut g = state.hud_phase.lock().map_err(|e| e.to_string())?;
         *g = HudPhase::Listening;
@@ -1568,10 +1585,14 @@ async fn start_capture(app: &tauri::AppHandle, state: &AppState) -> Result<(), S
         state.ptt_session_active.store(false, Ordering::SeqCst);
         return Err(e);
     }
-    if !dictation::enabled(app, "background_dictation", true) && !dictation::busy(state).await {
+    *state.live_preview_status.lock().await = String::new();
+    if !dictation::busy(state).await {
         try_spawn_live_preview(app, state).await;
     } else {
         state.live_stream_session_id.store(0, Ordering::SeqCst);
+        if live_preview_wanted(&conn) {
+            *state.live_preview_status.lock().await = "Preview unavailable while earlier dictation finishes. Audio is still recording.".into();
+        }
     }
     Ok(())
 }
@@ -1975,6 +1996,9 @@ struct HudSnapshot {
     /// Brief post-dictation status (empty hold, pasted count). Empty when idle/expired.
     outcome: String,
     pending: usize,
+    microphone: audio::MicrophoneStatus,
+    preview_status: String,
+    engine_progress: sidecar::EngineProgress,
 }
 
 #[derive(Serialize)]
@@ -1994,6 +2018,33 @@ fn hud_chrome_info() -> HudChromeInfo {
     }
 }
 
+async fn engine_progress_inner(state: &AppState) -> sidecar::EngineProgress {
+    let side = state.sidecar.lock().await.clone();
+    if let Some(side) = side { return side.progress.lock().await.clone(); }
+    sidecar::EngineProgress::default()
+}
+
+#[tauri::command]
+async fn engine_progress(state: State<'_, AppState>) -> Result<sidecar::EngineProgress, String> {
+    Ok(engine_progress_inner(&state).await)
+}
+
+#[tauri::command]
+fn microphone_status(state: State<'_, AppState>) -> Result<audio::MicrophoneStatus, String> {
+    Ok(state.ptt.snapshot_status())
+}
+
+#[tauri::command]
+async fn hud_toggle_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let result = if state.ptt_session_active.load(Ordering::SeqCst) {
+        dictation::stop(&app, &state).await.map(|_| ())
+    } else {
+        dictation::start(&app, &state, true).await
+    };
+    if let Err(ref e) = result { set_dictation_outcome(&state, e); }
+    result
+}
+
 #[tauri::command]
 async fn hud_snapshot(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<HudSnapshot, String> {
     let mut phase = *state.hud_phase.lock().map_err(|e| e.to_string())?;
@@ -2003,11 +2054,18 @@ async fn hud_snapshot(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         else if pending > 0 { phase = HudPhase::Transcribing; }
     }
     let preview = if phase == HudPhase::Listening { state.live_hud_preview.lock().await.clone() } else { String::new() };
-    let (outcome, expired) = take_dictation_outcome_if_fresh(&state);
-    if expired && phase == HudPhase::Idle {
-        let _ = hud::set_layout(&app, hud::HudLayout::Collapsed);
-    }
-    Ok(HudSnapshot { phase, preview, outcome, pending })
+    let (outcome, _) = take_dictation_outcome_if_fresh(&state);
+    let microphone = state.ptt.snapshot_status();
+    let preview_status = state.live_preview_status.lock().await.clone();
+    let engine_progress = engine_progress_inner(&state).await;
+    let needs_detail = !preview.is_empty() || !outcome.is_empty() || !microphone.error.is_empty()
+        || (phase == HudPhase::Listening && (!microphone.notice.is_empty() || !preview_status.is_empty()))
+        || matches!(engine_progress.stage.as_str(), "checking" | "downloading" | "loading" | "warming");
+    let layout = if needs_detail { hud::HudLayout::Preview }
+        else if phase == HudPhase::Listening || phase == HudPhase::Transcribing { hud::HudLayout::Listening }
+        else { hud::HudLayout::Collapsed };
+    let _ = hud::set_layout(&app, layout);
+    Ok(HudSnapshot { phase, preview, outcome, pending, microphone, preview_status, engine_progress })
 }
 
 /// Latest dictation outcome for the main window (Home tips / status). Same TTL as HUD.
@@ -2212,6 +2270,9 @@ pub fn run() {
             install_nvidia_whisper_libs,
             hud_chrome_info,
             hud_snapshot,
+            hud_toggle_recording,
+            engine_progress,
+            microphone_status,
             last_dictation_outcome_cmd,
             hud_sync_visibility_cmd,
             focus_main_window,

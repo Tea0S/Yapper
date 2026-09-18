@@ -13,12 +13,10 @@ pub(crate) fn widget_enabled(app: &AppHandle) -> Result<bool, String> {
     Ok(v.as_deref() != Some("false"))
 }
 
-/// Collapsed “always there” capsule — height includes space above the pill for the hover tooltip.
-const SIZE_COLLAPSED: (f64, f64) = (112.0, 168.0);
-/// PTT / transcribing with meter only — slight bump so the dots breathe, not a giant bar.
-const SIZE_LISTENING: (f64, f64) = (152.0, 200.0);
-/// Live preview line under the meter — a bit wider and taller, still compact.
-const SIZE_PREVIEW: (f64, f64) = (228.0, 236.0);
+// Window bounds match the visible surface; no invisible tooltip reservation.
+const SIZE_COLLAPSED: (f64, f64) = (180.0, 40.0);
+const SIZE_LISTENING: (f64, f64) = (240.0, 52.0);
+const SIZE_PREVIEW: (f64, f64) = (320.0, 104.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HudLayout {
@@ -42,15 +40,39 @@ fn hud_url(app: &AppHandle) -> Result<Url, String> {
 fn set_logical_size_keep_hcenter(win: &WebviewWindow, lw: f64, lh: f64) -> Result<(), String> {
     let pos = win.outer_position().map_err(|e| e.to_string())?;
     let old_sz = win.outer_size().map_err(|e| e.to_string())?;
+    let scale = win.scale_factor().map_err(|e| e.to_string())?;
+    if old_sz.width == (lw * scale).round() as u32 && old_sz.height == (lh * scale).round() as u32 { return Ok(()); }
     let center_x = pos.x + old_sz.width as i32 / 2;
+    let bottom = pos.y + old_sz.height as i32;
 
     win.set_size(LogicalSize::new(lw, lh))
         .map_err(|e| e.to_string())?;
 
     let new_sz = win.outer_size().map_err(|e| e.to_string())?;
     let new_x = center_x - new_sz.width as i32 / 2;
-    win.set_position(PhysicalPosition::new(new_x, pos.y))
+    win.set_position(PhysicalPosition::new(new_x, bottom - new_sz.height as i32))
         .map_err(|e| e.to_string())?;
+    shape_window(win)?;
+    Ok(())
+}
+
+/// Clip native hit testing too, so rounded transparent corners belong to the app behind us.
+fn shape_window(win: &WebviewWindow) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+        let size = win.outer_size().map_err(|e| e.to_string())?;
+        let radius = (32.0 * win.scale_factor().map_err(|e| e.to_string())?).round() as i32;
+        let hwnd = win.hwnd().map_err(|e| e.to_string())?;
+        unsafe {
+            let region = CreateRoundRectRgn(0, 0, size.width as i32 + 1, size.height as i32 + 1, radius, radius);
+            if region.0.is_null() { return Err("Could not shape dictation widget".into()); }
+            if SetWindowRgn(windows::Win32::Foundation::HWND(hwnd.0), Some(region), true) == 0 {
+                let _ = DeleteObject(region.into());
+                return Err("Could not apply dictation widget shape".into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -81,6 +103,7 @@ fn build_hud_window(app: &AppHandle, url: Url) -> Result<WebviewWindow, String> 
         .skip_taskbar(true)
         .visible(false)
         .focused(false)
+        .focusable(false)
         .shadow(false)
         .transparent(true)
         .on_navigation(|url| crate::allow_navigation_in_webview(url))
@@ -105,6 +128,7 @@ pub fn ensure_collapsed_visible(app: &AppHandle) -> Result<(), String> {
     }
 
     let win = build_hud_window(app, url)?;
+    shape_window(&win)?;
     position_bottom_center(&win)?;
     win.show().map_err(|e| e.to_string())?;
     let _ = win.set_always_on_top(true);
@@ -166,5 +190,15 @@ impl Drop for HudCollapseAfterPtt {
             HudLayout::Collapsed
         };
         let _ = set_layout(&self.app, layout);
+    }
+}
+
+/// Optional brief Windows cues, kept off by default.
+pub fn sound_cue(app: &AppHandle, frequency: u32) {
+    #[cfg(windows)]
+    if crate::dictation::enabled(app, "dictation_sound_cues", false) {
+        std::thread::spawn(move || unsafe {
+            let _ = windows::Win32::System::Diagnostics::Debug::Beep(frequency, 45);
+        });
     }
 }

@@ -78,11 +78,47 @@
   let whisperDevice = $state("auto");
   let inputDeviceId = $state("");
   let micDevices = $state<{ id: string; label: string }[]>([]);
+  let dictationSoundCues = $state(false);
+  let microphoneFallback = $state(true);
+  let microphoneMessage = $state("");
+  let microphoneError = $state("");
+  let microphoneSaving = $state(false);
+  let microphoneRefreshing = $state(false);
+  let engineProgress = $state("");
+  const microphoneMissing = $derived(Boolean(inputDeviceId) && !micDevices.some(d => d.id === inputDeviceId));
+
+  async function refreshMicrophones() {
+    if (microphoneRefreshing) return;
+    microphoneRefreshing = true;
+    try {
+      micDevices = await invoke<{ id: string; label: string }[]>("list_audio_input_devices");
+      microphoneError = "";
+    } catch (e) { microphoneError = String(e); }
+    finally { microphoneRefreshing = false; }
+  }
+
+  onMount(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refreshMicrophones();
+      if (restartingEngine) void invoke<{ message: string }>("engine_progress").then(p => engineProgress = p.message).catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  });
+
   let adaptiveMicrophone = $state(true);
   let backgroundDictation = $state(true);
   let dictionaryHints = $state(true);
   let presetMessage = $state("");
   let settingsError = $state("");
+
+  let restartingEngine = $state(false);
+  const selectedSpeed = $derived.by(() => {
+    if (engine !== "whisper" || whisperBestOf !== "1" || whisperPatience !== "1" || whisperTemperature !== "0" || computeType !== "int8") return "custom";
+    for (const [preset, size, beam] of [["fast", "base", "1"], ["balanced", "small", "3"], ["accurate", "medium", "5"]]) {
+      if (whisperModel === (appleSilicon ? `mlx-community/whisper-${size}-mlx` : size) && whisperBeamSize === beam) return preset;
+    }
+    return "custom";
+  });
 
   function choosePreset(preset: "fast" | "balanced" | "accurate") {
     engine = "whisper";
@@ -108,6 +144,7 @@
   let lazyLoadWhisper = $state(false);
   let hudWidgetEnabled = $state(true);
   let modelIdleUnloadMins = $state("0");
+  const selectedReadiness = $derived(!lazyLoadWhisper && modelIdleUnloadMins === "0" ? "ready" : lazyLoadWhisper && modelIdleUnloadMins === "5" ? "memory" : "custom");
 
   let whisperBeamSize = $state("5");
   let whisperBestOf = $state("1");
@@ -293,6 +330,8 @@
     }
     inputDeviceId =
       (await invoke<string | null>("get_setting_cmd", { key: "input_device_name" })) ?? "";
+    dictationSoundCues = (await invoke<string | null>("get_setting_cmd", { key: "dictation_sound_cues" })) === "true";
+    microphoneFallback = (await invoke<string | null>("get_setting_cmd", { key: "microphone_auto_fallback" })) !== "false";
     adaptiveMicrophone = (await invoke<string | null>("get_setting_cmd", { key: "adaptive_microphone" })) !== "false";
     backgroundDictation = (await invoke<string | null>("get_setting_cmd", { key: "background_dictation" })) !== "false";
     dictionaryHints = (await invoke<string | null>("get_setting_cmd", { key: "dictionary_recognition_hints" })) !== "false";
@@ -711,6 +750,13 @@
   }
 
   async function saveMicrophoneOnly() {
+    if (microphoneSaving) return;
+    microphoneSaving = true;
+    microphoneMessage = "";
+    microphoneError = "";
+    try {
+    await invoke("set_setting_cmd", { key: "dictation_sound_cues", value: String(dictationSoundCues) });
+    await invoke("set_setting_cmd", { key: "microphone_auto_fallback", value: String(microphoneFallback) });
     await invoke("set_setting_cmd", { key: "adaptive_microphone", value: String(adaptiveMicrophone) });
     await invoke("set_setting_cmd", { key: "input_device_name", value: inputDeviceId });
     await invoke("set_setting_cmd", {
@@ -726,6 +772,9 @@
       value: micNormalizePeak,
     });
     await invoke("set_setting_cmd", { key: "mic_max_gain", value: micMaxGain });
+    microphoneMessage = "Microphone and pause preferences saved for the next recording.";
+    } catch (e) { microphoneError = String(e); }
+    finally { microphoneSaving = false; }
   }
 
   async function saveKeybinds() {
@@ -749,13 +798,18 @@
   }
 
   async function restartEngine() {
+    if (restartingEngine) return;
+    restartingEngine = true;
+    engineProgress = "";
+    presetMessage = "Saving settings and restarting the engine…";
     settingsError = "";
     try {
       await saveCore();
       await invoke("engine_stop");
       await invoke("engine_start");
       presetMessage = "Settings applied. Engine ready.";
-    } catch (e) { settingsError = String(e); }
+    } catch (e) { presetMessage = ""; settingsError = String(e); }
+    finally { restartingEngine = false; }
   }
 
   async function installNvidiaWhisperLibs() {
@@ -782,16 +836,19 @@
         type="button"
         class="theme-seg"
         class:active={uiTheme === "light"}
+        aria-pressed={uiTheme === "light"}
         onclick={() => changeUiTheme("light")}>Light</button>
       <button
         type="button"
         class="theme-seg"
         class:active={uiTheme === "dark"}
+        aria-pressed={uiTheme === "dark"}
         onclick={() => changeUiTheme("dark")}>Dark</button>
       <button
         type="button"
         class="theme-seg"
         class:active={uiTheme === "system"}
+        aria-pressed={uiTheme === "system"}
         onclick={() => changeUiTheme("system")}>Match system</button>
     </div>
     <label class="check contrast-check">
@@ -864,11 +921,13 @@
         type="button"
         class="theme-seg"
         class:active={instanceRole === "dictation"}
+        aria-pressed={instanceRole === "dictation"}
         onclick={() => setInstanceRole("dictation")}>Dictation on this PC</button>
       <button
         type="button"
         class="theme-seg"
         class:active={instanceRole === "network_server"}
+        aria-pressed={instanceRole === "network_server"}
         onclick={() => setInstanceRole("network_server")}>Network processing server</button>
     </div>
   </div>
@@ -991,21 +1050,25 @@
     <div class="panel">
       <h3>Dictation speed</h3>
       <p>Choose a Whisper starting point, then fine-tune below. Larger models use more memory and may improve accuracy.</p>
-      <div class="row">
-        <button class="btn" onclick={() => choosePreset("fast")}>Fast · base</button>
-        <button class="btn" onclick={() => choosePreset("balanced")}>Balanced · small</button>
-        <button class="btn" onclick={() => choosePreset("accurate")}>Accurate · medium</button>
+      <div class="row" role="group" aria-label="Dictation speed">
+        <button class="btn" aria-pressed={selectedSpeed === "fast"} onclick={() => choosePreset("fast")}>Fast · base</button>
+        <button class="btn" aria-pressed={selectedSpeed === "balanced"} onclick={() => choosePreset("balanced")}>Balanced · small</button>
+        <button class="btn" aria-pressed={selectedSpeed === "accurate"} onclick={() => choosePreset("accurate")}>Accurate · medium</button>
       </div>
+      <p class="field-hint">Selected: {selectedSpeed === "custom" ? "Custom settings" : selectedSpeed === "fast" ? "Fast" : selectedSpeed === "balanced" ? "Balanced" : "Accurate"}. Save &amp; restart to apply changes.</p>
       {#if presetMessage}<p role="status">{presetMessage}</p>{/if}
       {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
       <p>Use a recent recording on Home to benchmark this setup before choosing a larger model.</p>
-      <label class="check"><input type="checkbox" bind:checked={backgroundDictation} />Process completed phrases while I speak</label>
-      <p class="field-hint">Starts after eight seconds at a natural pause. You can record the next dictation while the previous one finishes. Disable to use the experimental streaming preview instead.</p>
+      <label class="check"><input type="checkbox" bind:checked={backgroundDictation} disabled={liveDictationExperimental} />Process completed phrases while I speak</label>
+      <p class="field-hint">Starts after eight seconds at a natural pause. You can record the next dictation while the previous one finishes. Live preview takes priority when enabled; this preference resumes when live preview is off.</p>
       <label class="check"><input type="checkbox" bind:checked={dictionaryHints} />Help Whisper recognize my dictionary words</label>
       <p class="field-hint">Uses up to 32 priority terms. Restart the engine after editing your dictionary to refresh recognition hints. Text corrections still apply immediately.</p>
       <h3>Engine readiness</h3>
-      <button class="btn" onclick={() => chooseReadiness(true)}>Ready instantly</button>
-      <button class="btn" onclick={() => chooseReadiness(false)}>Save memory</button>
+      <div class="row" role="group" aria-label="Engine readiness">
+        <button class="btn" aria-pressed={selectedReadiness === "ready"} onclick={() => chooseReadiness(true)}>Ready instantly</button>
+        <button class="btn" aria-pressed={selectedReadiness === "memory"} onclick={() => chooseReadiness(false)}>Save memory</button>
+      </div>
+      <p class="field-hint">Selected: {selectedReadiness === "custom" ? "Custom settings" : selectedReadiness === "ready" ? "Ready instantly" : "Save memory"}. Save &amp; restart to apply changes.</p>
       <p class="field-hint">Ready instantly loads at engine start and stays loaded. Save memory loads on demand and unloads after five idle minutes.</p>
     </div>
     <div class="field">
@@ -1133,7 +1196,8 @@
     {/if}
 
     {#if engine === "whisper"}
-      <h3 class="settings-subh">Fine-tuning (Whisper)</h3>
+      <details>
+      <summary>Advanced recognition settings</summary>
       <p class="note">
         Applied when the engine starts — use <em>Save &amp; restart engine</em>. Higher values often mean slower runs.
       </p>
@@ -1306,6 +1370,9 @@
         Voice detection on file uploads (recommended)
       </label>
 
+      </details>
+    {/if}
+
       <h3 class="settings-subh">Experimental live dictation</h3>
       <p class="note">
         While you hold push-to-talk, Moonshine or Sherpa streams a live preview into the <strong>HUD widget</strong>.
@@ -1315,8 +1382,9 @@
       </p>
       <label class="check">
         <input type="checkbox" bind:checked={liveDictationExperimental} />
-        Live HUD preview while holding (experimental)
+        Live preview while recording (experimental)
       </label>
+      {#if liveDictationExperimental}<p role="status">Live preview is selected. Background phrase processing is paused to keep the engines from competing. Final text is transcribed when you stop.</p>{/if}
       <div class="field">
         <label for="liveEng">Live streaming engine</label>
         <select
@@ -1373,7 +1441,6 @@
         />
         <p class="field-hint">Skip early ticks if the buffer is shorter than this (200–10000). Default 800.</p>
       </div>
-    {/if}
 
     <label class="check">
       <input type="checkbox" bind:checked={mock} />
@@ -1421,9 +1488,11 @@
         </details>
       {/if}
     </div>
-    <button type="button" class="btn btn-primary" onclick={restartEngine}>
-      Save &amp; restart engine
+    <button type="button" class="btn btn-primary" disabled={restartingEngine} onclick={restartEngine}>
+      {restartingEngine ? "Applying settings…" : "Save & restart engine"}
     </button>
+    {#if presetMessage}<p role="status">{restartingEngine && engineProgress ? engineProgress : presetMessage}</p>{/if}
+    {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
   </div>
 
   {#if !appIsMac}
@@ -1451,18 +1520,31 @@
   {/if}
 
   <div class="panel block">
-    <h2>Microphone</h2>
+    <h2 id="microphone">Microphone</h2>
     <label class="check"><input type="checkbox" bind:checked={adaptiveMicrophone} />Automatically adapt speech detection to my microphone</label>
     <p class="field-hint">Estimates background noise for each recording and preserves a short margin around speech. Turn off to use the manual noise gate below.</p>
     <p class="muted short">Used for push-to-talk and dictation in the app. Sliders adjust sensitivity and volume shaping.</p>
     <div class="field">
       <label for="mic">Microphone</label>
       <select id="mic" bind:value={inputDeviceId}>
+        {#if microphoneMissing}<option value={inputDeviceId}>{inputDeviceId} (disconnected)</option>{/if}
         {#each micDevices as d}
           <option value={d.id}>{d.label}</option>
         {/each}
       </select>
     </div>
+    {#if microphoneMissing}<p role="status">Your preferred microphone is disconnected. {microphoneFallback ? "The system default will be used until it returns." : "Reconnect it or choose a different microphone."}</p>{/if}
+    <button class="btn" disabled={microphoneRefreshing} onclick={refreshMicrophones}>{microphoneRefreshing ? "Checking microphones…" : "Refresh microphones"}</button>
+    <label class="check"><input type="checkbox" bind:checked={microphoneFallback} />Use the system default if my preferred microphone is unavailable</label>
+    <p class="field-hint">Your preferred microphone stays saved and is tried again at the next recording. A microphone change takes effect on your next recording.</p>
+    {#if !appIsMac}<label class="check"><input type="checkbox" bind:checked={dictationSoundCues} />Play brief sounds for recording, processing, insertion and errors (Windows)</label>{/if}
+    <h3>Speaking pace</h3>
+    <div class="row" role="group" aria-label="Pause tolerance">
+      <button class="btn" aria-pressed={vadMinSilenceMs === "500"} onclick={() => vadMinSilenceMs = "500"}>Natural pauses</button>
+      <button class="btn" aria-pressed={vadMinSilenceMs === "1500"} onclick={() => vadMinSilenceMs = "1500"}>Longer pauses</button>
+      <button class="btn" aria-pressed={vadMinSilenceMs === "3000"} onclick={() => vadMinSilenceMs = "3000"}>Extra time</button>
+    </div>
+    <p class="field-hint">Longer pauses keep more of your thought together before background processing begins. Recording continues until you stop it. Recognition may still add punctuation.</p>
     <div class="field">
       <label for="vad">Background noise gate</label>
       <div class="slider-row">
@@ -1486,7 +1568,7 @@
           id="vadms"
           type="range"
           min="100"
-          max="1200"
+          max="3000"
           step="10"
           value={Math.round(n(vadMinSilenceMs, 500))}
           oninput={(e) => (vadMinSilenceMs = e.currentTarget.value)}
@@ -1530,7 +1612,9 @@
       </div>
       <p class="field-hint">Raise if transcripts are empty; lower if sound distorts.</p>
     </div>
-    <button type="button" class="btn" onclick={saveMicrophoneOnly}>Save microphone settings</button>
+    <button type="button" class="btn" disabled={microphoneSaving} onclick={saveMicrophoneOnly}>{microphoneSaving ? "Saving…" : "Save microphone settings"}</button>
+    {#if microphoneMessage}<p role="status">{microphoneMessage}</p>{/if}
+    {#if microphoneError}<p class="warn" role="alert">{microphoneError}</p>{/if}
   </div>
 
   <div class="panel block">
@@ -1606,6 +1690,7 @@
           type="button"
           class="btn keybind-record"
           class:active={captureTarget === "push_to_talk"}
+        aria-pressed={captureTarget === "push_to_talk"}
           onclick={() =>
             (captureTarget = captureTarget === "push_to_talk" ? null : "push_to_talk")}
         >
@@ -1626,6 +1711,7 @@
           type="button"
           class="btn keybind-record"
           class:active={captureTarget === "toggle_open_mic"}
+        aria-pressed={captureTarget === "toggle_open_mic"}
           onclick={() =>
             (captureTarget =
               captureTarget === "toggle_open_mic" ? null : "toggle_open_mic")}
@@ -1647,6 +1733,7 @@
           type="button"
           class="btn keybind-record"
           class:active={captureTarget === "stop_dictation"}
+        aria-pressed={captureTarget === "stop_dictation"}
           onclick={() =>
             (captureTarget = captureTarget === "stop_dictation" ? null : "stop_dictation")}
         >

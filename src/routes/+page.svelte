@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+  import { beforeNavigate } from "$app/navigation";
 
   type EngineState = {
     ready: boolean;
@@ -18,13 +19,21 @@
   let testTranscript = $state("");
   let testRecording = $state(false);
   let testTranscribing = $state(false);
+  let testNotice = $state("");
+  let testStarting = $state(false);
   let testError = $state<string | null>(null);
-  /** True as soon as pointer goes down — before `ptt_start` IPC returns (fixes quick-click / event order bugs). */
+  /** Owns the test session while microphone startup is pending. */
   let testPttArmed = $state(false);
   let testPttStartPromise: Promise<void> | null = null;
+  let engineProgress = $state("");
+  let microphoneNotice = $state("");
+  let microphoneName = $state("");
+  let microphoneError = $state("");
   let dictationOutcome = $state("");
   type DictationJob = { id: number; text: string; status: string; error: string | null; audio_seconds: number; elapsed_ms: number; app_key: string | null };
   let jobs = $state<DictationJob[]>([]);
+  let pasteModes = $state<Record<string, boolean>>({});
+  let pasteModeBusy = $state(false);
   let jobError = $state("");
   let jobNotice = $state("");
   let jobAction = $state<number | null>(null);
@@ -32,8 +41,22 @@
   let correctionTo = $state("");
   let correctionJob = $state<number | null>(null);
 
+  beforeNavigate(({ cancel }) => {
+    if (testStarting || testRecording) {
+      cancel();
+      testError = "Stop the microphone test before leaving this page.";
+    }
+  });
+
   async function refreshJobs() {
-    try { jobs = await invoke<DictationJob[]>("dictation_jobs"); } catch { /* older engine */ }
+    try {
+      jobs = await invoke<DictationJob[]>("dictation_jobs");
+      for (const key of new Set(jobs.map(j => j.app_key).filter((key): key is string => Boolean(key)))) {
+        if (!(key in pasteModes)) {
+          pasteModes[key] = (await invoke<string | null>("get_setting_cmd", { key: `paste_multiline_app_${key}` })) === "true";
+        }
+      }
+    } catch { /* A later refresh retries unavailable settings. */ }
   }
 
   async function jobCommand(id: number, command: "retry_dictation" | "discard_dictation" | "benchmark_dictation") {
@@ -74,14 +97,19 @@
   }
 
   async function setPasteMode(appKey: string, multiline: boolean) {
+    if (pasteModeBusy) return;
+    pasteModeBusy = true;
+    jobError = "";
     try {
       await invoke("set_setting_cmd", { key: `paste_multiline_app_${appKey}`, value: String(multiline) });
+      pasteModes[appKey] = multiline;
       jobNotice = multiline ? "Single-paste paragraphs enabled for this application." : "Chat-safe line breaks enabled for this application.";
     } catch (e) { jobError = String(e); }
+    finally { pasteModeBusy = false; }
   }
 
   let showWhatsNew = $state(false);
-  const WHATS_NEW_VERSION = "1.3.2";
+  const WHATS_NEW_VERSION = "1.3.4";
 
   type MicLevel = { rms: number; peak: number };
   let micLevel = $state<MicLevel>({ rms: 0, peak: 0 });
@@ -184,6 +212,14 @@
     const id = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       void refreshJobs();
+      void invoke<{ message: string }>("engine_progress").then(p => engineProgress = p.message).catch(() => {});
+      void invoke<{ device: string; notice: string; error: string; recording: boolean }>("microphone_status").then(m => {
+        microphoneName = m.device; microphoneNotice = m.notice; microphoneError = m.error;
+        if (testRecording && !m.recording && !testStarting) {
+          testRecording = false; testPttArmed = false; testPttStartPromise = null;
+          testNotice = "Recording stopped. Your transcript will appear in Recent dictations when processing finishes.";
+        }
+      }).catch(() => {});
       invoke<MicLevel>("get_mic_input_level")
         .then((l) => {
           micLevel = l;
@@ -225,6 +261,7 @@
   async function startEngine() {
     lastError = null;
     starting = true;
+    engineProgress = "";
     try {
       const next = await invoke<EngineState>("engine_start");
       engine = next;
@@ -267,6 +304,8 @@
     }
     if (testPttArmed || testRecording) return;
     testError = null;
+    testNotice = "";
+    testStarting = true;
     testPttArmed = true;
     testPttStartPromise = invoke("ptt_start")
       .then(() => {
@@ -277,7 +316,8 @@
         testPttArmed = false;
         testRecording = false;
         testPttStartPromise = null;
-      });
+      })
+      .finally(() => { testStarting = false; });
   }
 
   async function testPttUp() {
@@ -293,11 +333,10 @@
       const text = await withTimeout(
         invoke<string>("ptt_stop"),
         PTT_STOP_TIMEOUT_MS,
-        "Transcription timed out after ~11 min — check the dev terminal for [yapper-sidecar] lines or a sidecar error above. Use Python 3.10–3.12 and: py -3.12 -m pip install -r sidecar/requirements.txt",
+        "Transcription took too long. Check the engine status and try again.",
       );
-      testTranscript = text.trim()
-        ? text
-        : "Hold longer — nothing transcribed. Aim for about one second of speech.";
+      testTranscript = text;
+      testNotice = text.trim() ? "Transcript ready. You can edit it here before copying." : "No speech detected. Check your microphone and try a full sentence.";
     } catch (e) {
       testError = String(e);
     } finally {
@@ -306,31 +345,29 @@
   }
 
   async function copyTestTranscript() {
-    if (
-      !testTranscript ||
-      testTranscript.startsWith("(no speech") ||
-      testTranscript.startsWith("Hold longer")
-    )
-      return;
+    if (!testTranscript.trim()) return;
+    testError = null;
     try {
       await navigator.clipboard.writeText(testTranscript);
+      testNotice = "Transcript copied.";
     } catch {
-      /* ignore */
+      testError = "Could not copy. Select the transcript and copy it with your keyboard.";
     }
   }
+
 </script>
 
 <section class="hero">
   {#if showWhatsNew}
-    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.2">
+    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.4">
       <div class="whats-new-head">
-        <h2 class="whats-new-title">What’s new in 1.3.2</h2>
+        <h2 class="whats-new-title">What’s new in 1.3.4</h2>
         <button type="button" class="btn mini" onclick={dismissWhatsNew}>Dismiss</button>
       </div>
       <ul class="whats-new-list">
-        <li>Fixed Windows dictation failures caused by accented letters and punctuation</li>
-        <li>Reliable Unicode communication with the inference engine</li>
-        <li>Engine diagnostics remain available after unexpected characters</li>
+        <li>Microphone recovery, optional recording sounds and longer-pause presets</li>
+        <li>A compact widget with Speak/Stop controls and no oversized invisible window</li>
+        <li>Live preview fixes and clearer model download, loading and warm-up feedback</li>
       </ul>
     </div>
   {/if}
@@ -416,7 +453,7 @@
       <span class="pulse" aria-hidden="true"></span>
       <div>
         <strong>Starting engine</strong>
-        <p class="detail">Loading the sidecar or connecting to your node — this can take a few seconds the first time.</p>
+        <p class="detail">{engineProgress || "Starting speech engine or connecting to your node…"}</p>
       </div>
     </div>
   {:else if engine}
@@ -473,8 +510,10 @@
         {#if job.app_key}
           <details><summary>Line breaks for this destination</summary>
             <p>Applies to this application ({job.app_key.split(/[\\/]/).pop()}). Choose single paste for document editors; chat-safe mode uses Shift+Enter between lines.</p>
-            <button class="btn" onclick={() => setPasteMode(job.app_key!, true)}>Single paste</button>
-            <button class="btn" onclick={() => setPasteMode(job.app_key!, false)}>Chat-safe line breaks</button>
+            <div role="group" aria-label="Line breaks for this application">
+              <button class="btn" disabled={pasteModeBusy || !(job.app_key in pasteModes)} aria-pressed={pasteModes[job.app_key] === true} onclick={() => setPasteMode(job.app_key!, true)}>Single paste</button>
+              <button class="btn" disabled={pasteModeBusy || !(job.app_key in pasteModes)} aria-pressed={pasteModes[job.app_key] === false} onclick={() => setPasteMode(job.app_key!, false)}>Chat-safe line breaks</button>
+            </div>
           </details>
         {/if}
         {#if correctionJob === job.id}
@@ -490,12 +529,17 @@
   </div>
 
   <div class="panel dictation-test">
-    <h2 class="test-title">Try dictation</h2>
-    <p class="muted test-lede">
-      Hold the button while you speak (same pipeline as push-to-talk). Hold at least <strong>about one second</strong>
-      so enough audio reaches Whisper; very short taps often come back empty. Transcript shows here only — nothing is
-      pasted elsewhere.
-    </p>
+    <h2 class="test-title">Try your microphone</h2>
+    {#if microphoneName}<p>Last used microphone: <strong>{microphoneName}</strong></p>{/if}
+    {#if microphoneNotice}<p role="status">{microphoneNotice}</p>{/if}
+    {#if microphoneError}<p class="warn" role="alert">{microphoneError} <a href="/settings#microphone">Microphone settings</a></p>{/if}
+    {#if (testRecording || testTranscribing) && engineProgress}<p role="status">{engineProgress}</p>{/if}
+    <ol class="setup-steps">
+      <li>Choose your microphone in <a href="/settings#microphone">Microphone settings</a>.</li>
+      <li>Start the engine, then select <strong>Start recording</strong>. Say a full sentence at your own pace.</li>
+      <li>Select <strong>Stop and transcribe</strong>, then check the words below. Nothing is pasted into another app.</li>
+    </ol>
+    {#if !engine?.ready}<p class="muted">Start the engine above to try dictation.</p>{/if}
     <div
       class="input-meter"
       role="group"
@@ -507,7 +551,7 @@
           {#if testRecording}
             Live
           {:else}
-            Hold to speak or use global push-to-talk
+            Select Start recording to check your microphone
           {/if}
         </span>
       </div>
@@ -525,49 +569,28 @@
     <button
       type="button"
       class="btn btn-primary test-ptt"
-      disabled={starting || stopping || !engine?.ready || testTranscribing}
-      onpointerdown={(e) => {
-        try {
-          e.currentTarget?.setPointerCapture?.(e.pointerId);
-        } catch {
-          /* capture unsupported or wrong phase */
-        }
-        testPttDown();
-      }}
-      onpointerup={(e) => {
-        try {
-          e.currentTarget?.releasePointerCapture?.(e.pointerId);
-        } catch {
-          /* ignore */
-        }
-        void testPttUp();
-      }}
-      onpointerleave={() => {
-        if (testPttArmed || testRecording) void testPttUp();
-      }}
+      disabled={testStarting || testTranscribing || (!testRecording && (starting || stopping || !engine?.ready))}
+      onclick={() => { if (testRecording) void testPttUp(); else testPttDown(); }}
     >
-      {testTranscribing
-        ? "Transcribing… (first run can take a while)"
-        : testRecording
-          ? "Recording… release to transcribe"
-          : "Hold to speak"}
+      {testStarting ? "Opening microphone…" : testTranscribing ? "Transcribing…" : testRecording ? "Stop and transcribe" : "Start recording"}
     </button>
+    <p role="status">{testRecording ? "Recording. Take your time; select Stop and transcribe when finished." : testTranscribing ? "Preparing your transcript. The first recording can take longer while the model loads." : testNotice}</p>
     {#if testError}
       <p class="warn" role="alert">{testError}</p>
     {/if}
     <label class="out-label" for="test-out">Transcript</label>
-    <textarea id="test-out" class="test-out" readonly rows="4" bind:value={testTranscript}></textarea>
-    <button type="button" class="btn" onclick={copyTestTranscript} disabled={!testTranscript}>Copy</button>
+    <textarea id="test-out" class="test-out" readonly={testStarting || testRecording || testTranscribing} rows="4" bind:value={testTranscript}></textarea>
+    <button type="button" class="btn" onclick={copyTestTranscript} disabled={!testTranscript.trim() || testRecording || testTranscribing}>Copy transcript</button>
   </div>
 
   <ul class="tips">
     <li>Hold <kbd>Push-to-talk</kbd> (see Settings) to dictate; text is pasted on release.</li>
-    <li>Install Python deps: <code>pip install -r sidecar/requirements.txt</code></li>
+    <li>Prefer not to hold a key? Set a toggle recording shortcut in <a href="/settings">Settings</a>.</li>
     <li>
       Choosing a Whisper size for the first time can <strong>download</strong> model weights (see Settings). Stopping
       the engine exits the sidecar and frees GPU memory; optional idle unload is in Settings too.
     </li>
-    <li>Optional GPU node: <code>python yapper-node/main.py --token your-secret</code></li>
+
   </ul>
 </section>
 
@@ -778,7 +801,7 @@
     margin: 0 0 0.5rem;
     font-size: 1.05rem;
   }
-  .test-lede {
+  .setup-steps {
     margin: 0 0 1rem;
     font-size: 0.9rem;
   }

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from .progress import report
 
 ARCH_MAP = {
     "tiny_streaming": "TINY_STREAMING",
@@ -91,6 +92,7 @@ class StreamSession:
             return
         from moonshine_voice import Transcriber
 
+        report("loading", "Preparing live preview model; missing files download on first use...")
         model_path, model_arch = resolve_model(self.model_name, self.model_dir)
         self.transcriber = Transcriber(
             model_path=model_path,

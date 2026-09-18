@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Last callback-sized RMS / peak for a simple input meter (0..1, float samples).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +70,25 @@ pub fn list_input_devices() -> Result<Vec<AudioInputDevice>, String> {
     Ok(v)
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MicrophoneStatus {
+    pub recording: bool,
+    pub device: String,
+    pub notice: String,
+    pub error: String,
+    #[serde(skip)]
+    last_callback: Option<Instant>,
+}
+
+impl MicrophoneStatus {
+    fn check_stalled(&mut self) {
+        if self.recording && self.error.is_empty()
+            && self.last_callback.is_some_and(|last| last.elapsed() > Duration::from_secs(4)) {
+            self.error = "Microphone stopped sending audio. Stop to keep the captured speech, then reconnect or choose another microphone.".into();
+        }
+    }
+}
+
 fn resolve_input_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device, String> {
     if let Some(n) = name.map(str::trim).filter(|s| !s.is_empty()) {
         for d in host.input_devices().map_err(|e| e.to_string())? {
@@ -84,7 +104,7 @@ fn resolve_input_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::D
 
 /// Commands to the dedicated microphone thread (`cpal::Stream` is not `Send` / `Sync`).
 pub enum PttControlCmd {
-    Start(mpsc::Sender<Result<(), String>>, Option<String>),
+    Start(mpsc::Sender<Result<(), String>>, Option<String>, bool),
     Stop(mpsc::Sender<Result<(Vec<f32>, u32), String>>),
     /// Copy current recording buffer without stopping or clearing (for live preview).
     SnapshotBuffer(mpsc::Sender<Result<(Vec<f32>, u32), String>>),
@@ -96,29 +116,37 @@ pub enum PttControlCmd {
 pub struct PttController {
     tx: Arc<Mutex<Sender<PttControlCmd>>>,
     pub input_levels: Arc<Mutex<InputLevelState>>,
+    pub status: Arc<Mutex<MicrophoneStatus>>,
 }
 
 impl PttController {
     pub fn spawn() -> Self {
         let input_levels = Arc::new(Mutex::new(InputLevelState::default()));
         let levels_for_thread = Arc::clone(&input_levels);
+        let status = Arc::new(Mutex::new(MicrophoneStatus::default()));
+        let status_for_thread = status.clone();
         let (tx, rx) = mpsc::channel::<PttControlCmd>();
         std::thread::spawn(move || {
-            let mut cap = PttCapture::new(levels_for_thread);
+            let mut cap = PttCapture::new(levels_for_thread, status_for_thread);
             while let Ok(cmd) = rx.recv() {
                 match cmd {
-                    PttControlCmd::Start(reply, device) => {
+                    PttControlCmd::Start(reply, device, fallback) => {
                         let res = (|| {
-                            cap.start_stream(device.as_deref())?;
+                            cap.start_stream(device.as_deref(), fallback)?;
                             cap.set_recording(true);
                             Ok::<_, String>(())
                         })();
+                        if let Err(ref error) = res {
+                            if let Ok(mut status) = cap.status.lock() { status.error = error.clone(); }
+                        }
                         let _ = reply.send(res);
                     }
                     PttControlCmd::Stop(reply) => {
+                        if let Ok(mut status) = cap.status.lock() { status.check_stalled(); }
                         cap.set_recording(false);
                         let samples = cap.take_buffer_f32();
                         let rate = cap.input_sample_rate;
+                        cap.stop_stream();
                         let _ = reply.send(Ok((samples, rate)));
                     }
                     PttControlCmd::SnapshotBuffer(reply) => {
@@ -129,7 +157,7 @@ impl PttController {
                     PttControlCmd::SnapshotTail(reply) => {
                         let rate = cap.input_sample_rate;
                         let result = cap.buffer.lock().map(|b| {
-                            (b[b.len().saturating_sub(rate as usize * 2)..].to_vec(), rate, b.len())
+                            (b[b.len().saturating_sub(rate as usize * 4)..].to_vec(), rate, b.len())
                         }).map_err(|_| "microphone buffer lock poisoned".to_string());
                         let _ = reply.send(result);
                     }
@@ -139,7 +167,12 @@ impl PttController {
         Self {
             tx: Arc::new(Mutex::new(tx)),
             input_levels,
+            status,
         }
+    }
+
+    pub fn snapshot_status(&self) -> MicrophoneStatus {
+        self.status.lock().map(|mut s| { s.check_stalled(); s.clone() }).unwrap_or_default()
     }
 
     pub fn snapshot_input_levels(&self) -> InputLevelState {
@@ -149,12 +182,12 @@ impl PttController {
             .unwrap_or_default()
     }
 
-    pub fn start(&self, device_name: Option<String>) -> Result<(), String> {
+    pub fn start(&self, device_name: Option<String>, fallback: bool) -> Result<(), String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
             .lock()
             .map_err(|_| "microphone thread lock poisoned".to_string())?
-            .send(PttControlCmd::Start(reply_tx, device_name))
+            .send(PttControlCmd::Start(reply_tx, device_name, fallback))
             .map_err(|_| "microphone thread stopped".to_string())?;
         reply_rx
             .recv()
@@ -185,7 +218,7 @@ impl PttController {
             .recv()
             .map_err(|_| "microphone thread stopped".to_string())?
     }
-    /// Inspect only the latest two seconds when looking for an endpoint.
+    /// Inspect only the latest four seconds when looking for an endpoint.
     pub fn snapshot_tail(&self) -> Result<(Vec<f32>, u32, usize), String> {
         let (tx, rx) = mpsc::channel();
         self.tx.lock().map_err(|_| "microphone thread lock poisoned")?
@@ -199,35 +232,45 @@ pub struct PttCapture {
     stream: Option<Stream>,
     /// Which device the open stream targets (`None` = default).
     stream_device_key: Option<String>,
+    status: Arc<Mutex<MicrophoneStatus>>,
     recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<f32>>>,
     input_levels: Arc<Mutex<InputLevelState>>,
 }
 
 impl PttCapture {
-    pub fn new(input_levels: Arc<Mutex<InputLevelState>>) -> Self {
+    pub fn new(input_levels: Arc<Mutex<InputLevelState>>, status: Arc<Mutex<MicrophoneStatus>>) -> Self {
         Self {
             input_sample_rate: 48_000,
             stream: None,
             stream_device_key: None,
+            status,
             recording: Arc::new(AtomicBool::new(false)),
             buffer: Arc::new(Mutex::new(Vec::new())),
             input_levels,
         }
     }
 
-    pub fn start_stream(&mut self, device_name: Option<&str>) -> Result<(), String> {
+    pub fn start_stream(&mut self, device_name: Option<&str>, fallback: bool) -> Result<(), String> {
         let wanted_key = device_name
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from);
-        if self.stream.is_some() && self.stream_device_key == wanted_key {
-            return Ok(());
-        }
+        // Re-resolve every recording: default devices and Bluetooth endpoints can change.
         self.stop_stream();
 
         let host = cpal::default_host();
-        let device = resolve_input_device(&host, device_name)?;
+        *self.status.lock().map_err(|e| e.to_string())? = MicrophoneStatus::default();
+        let device = match resolve_input_device(&host, device_name) {
+            Ok(device) => device,
+            Err(error) if fallback && wanted_key.is_some() => {
+                let device = resolve_input_device(&host, None)?;
+                self.status.lock().map_err(|e| e.to_string())?.notice = format!("{error}. Using the system default for this recording; your preferred microphone is still saved.");
+                device
+            }
+            Err(error) => return Err(format!("{error}. Reconnect it or choose another microphone in Settings.")),
+        };
+        self.status.lock().map_err(|e| e.to_string())?.device = device.name().unwrap_or_else(|_| "Microphone".into());
         let cfg = device
             .default_input_config()
             .map_err(|e| e.to_string())?;
@@ -243,9 +286,9 @@ impl PttCapture {
             return Err("Microphone reports zero channels".into());
         }
         let stream = match cfg.sample_format() {
-            SampleFormat::F32 => build_stream_f32(&device, &stream_cfg, channels, recording, buffer, levels),
-            SampleFormat::I16 => build_stream_i16(&device, &stream_cfg, channels, recording, buffer, levels),
-            SampleFormat::U16 => build_stream_u16(&device, &stream_cfg, channels, recording, buffer, levels),
+            SampleFormat::F32 => build_stream_f32(&device, &stream_cfg, channels, recording, buffer, levels, self.status.clone()),
+            SampleFormat::I16 => build_stream_i16(&device, &stream_cfg, channels, recording, buffer, levels, self.status.clone()),
+            SampleFormat::U16 => build_stream_u16(&device, &stream_cfg, channels, recording, buffer, levels, self.status.clone()),
             f => Err(format!("Unsupported sample format {f:?}")),
         }?;
 
@@ -261,6 +304,10 @@ impl PttCapture {
     }
 
     pub fn set_recording(&self, on: bool) {
+        if let Ok(mut status) = self.status.lock() {
+            status.recording = on;
+            if on { status.last_callback = Some(Instant::now()); }
+        }
         self.recording.store(on, Ordering::SeqCst);
         if on {
             if let Ok(mut b) = self.buffer.lock() {
@@ -317,12 +364,20 @@ fn build_stream_f32(
     recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<f32>>>,
     levels: Arc<Mutex<InputLevelState>>,
+    status: Arc<Mutex<MicrophoneStatus>>,
 ) -> Result<Stream, String> {
-    let err_fn = |e| eprintln!("cpal: {e}");
+    let callback_status = status.clone();
+    let err_fn = move |e| {
+        eprintln!("cpal: {e}");
+        if let Ok(mut s) = status.lock() {
+            s.error = "Microphone disconnected or stopped responding. Stop recording to keep the audio captured so far, then reconnect or choose another microphone.".into();
+        }
+    };
     let stream = device
         .build_input_stream(
             config,
             move |data: &[f32], _| {
+                if let Ok(mut s) = callback_status.lock() { s.last_callback = Some(Instant::now()); }
                 if recording.load(Ordering::SeqCst) {
                     if channels <= 1 {
                         update_input_levels(&levels, data);
@@ -352,12 +407,20 @@ fn build_stream_i16(
     recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<f32>>>,
     levels: Arc<Mutex<InputLevelState>>,
+    status: Arc<Mutex<MicrophoneStatus>>,
 ) -> Result<Stream, String> {
-    let err_fn = |e| eprintln!("cpal: {e}");
+    let callback_status = status.clone();
+    let err_fn = move |e| {
+        eprintln!("cpal: {e}");
+        if let Ok(mut s) = status.lock() {
+            s.error = "Microphone disconnected or stopped responding. Stop recording to keep the audio captured so far, then reconnect or choose another microphone.".into();
+        }
+    };
     let stream = device
         .build_input_stream(
             config,
             move |data: &[i16], _| {
+                if let Ok(mut s) = callback_status.lock() { s.last_callback = Some(Instant::now()); }
                 if recording.load(Ordering::SeqCst) {
                     let mut mono: Vec<f32> = Vec::with_capacity(data.len() / channels.max(1));
                     if channels <= 1 {
@@ -391,12 +454,20 @@ fn build_stream_u16(
     recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<f32>>>,
     levels: Arc<Mutex<InputLevelState>>,
+    status: Arc<Mutex<MicrophoneStatus>>,
 ) -> Result<Stream, String> {
-    let err_fn = |e| eprintln!("cpal: {e}");
+    let callback_status = status.clone();
+    let err_fn = move |e| {
+        eprintln!("cpal: {e}");
+        if let Ok(mut s) = status.lock() {
+            s.error = "Microphone disconnected or stopped responding. Stop recording to keep the audio captured so far, then reconnect or choose another microphone.".into();
+        }
+    };
     let stream = device
         .build_input_stream(
             config,
             move |data: &[u16], _| {
+                if let Ok(mut s) = callback_status.lock() { s.last_callback = Some(Instant::now()); }
                 if recording.load(Ordering::SeqCst) {
                     let mut mono: Vec<f32> = Vec::with_capacity(data.len() / channels.max(1));
                     if channels <= 1 {
@@ -583,7 +654,8 @@ pub fn vad_segments(samples: &[f32], threshold: f32, min_silence_ms: u32, sample
 
 #[cfg(test)]
 mod vad_tests {
-    use super::{vad_segments, adaptive_threshold, padded_vad_segments};
+    use super::{vad_segments, adaptive_threshold, padded_vad_segments, MicrophoneStatus};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn silence_does_not_fall_back_to_full_recording() {
@@ -607,6 +679,31 @@ mod vad_tests {
         let spans = padded_vad_segments(&samples, threshold, 200, 16000);
         assert_eq!(spans.len(), 1);
         assert!(spans[0].0 < 4000 && spans[0].1 > 8000);
+    }
+
+    #[test]
+    fn stalled_microphone_is_reported_only_during_recording() {
+        let mut status = MicrophoneStatus { recording: true,
+            last_callback: Some(Instant::now() - Duration::from_secs(5)), ..Default::default() };
+        status.check_stalled();
+        assert!(!status.error.is_empty());
+        status.recording = false;
+        status.error.clear();
+        status.check_stalled();
+        assert!(status.error.is_empty());
+    }
+
+    #[test]
+    fn longer_pauses_preserve_a_quiet_interrupted_thought() {
+        let mut samples = vec![0.0001; 16000 * 5];
+        samples[8000..16000].fill(0.004);
+        samples[32000..40000].fill(0.004);
+        let threshold = adaptive_threshold(&samples, 16000, 0.008);
+        let natural = padded_vad_segments(&samples, threshold, 500, 16000);
+        let patient = padded_vad_segments(&samples, threshold, 1500, 16000);
+        assert_eq!(natural.len(), 2);
+        assert_eq!(patient.len(), 1);
+        assert!(patient[0].0 < 8000 && patient[0].1 > 40000);
     }
 
     #[test]

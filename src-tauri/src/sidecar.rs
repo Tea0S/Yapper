@@ -429,7 +429,14 @@ pub struct SidecarSpawnEnv {
     pub ld_library_path_prepend_unix: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EngineProgress {
+    pub stage: String,
+    pub message: String,
+}
+
 pub struct SidecarSession {
+    pub progress: Arc<Mutex<EngineProgress>>,
     #[allow(dead_code)]
     pub child: Child,
     writer: Arc<Mutex<tokio::process::ChildStdin>>,
@@ -577,6 +584,8 @@ impl SidecarSession {
         });
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
         let stderr_lines = stderr_tail.clone();
+        let progress = Arc::new(Mutex::new(EngineProgress { stage: "starting".into(), message: "Starting speech engine...".into() }));
+        let progress_reader = progress.clone();
         let stderr_closed = Arc::new(tokio::sync::Notify::new());
         let stderr_done = stderr_closed.clone();
         tokio::spawn(async move {
@@ -585,6 +594,12 @@ impl SidecarSession {
             while let Ok(Some(bytes)) = reader.next_segment().await {
                 let decoded = String::from_utf8_lossy(&bytes);
                 let line = decoded.trim_end_matches('\r');
+                if let Some(json) = line.strip_prefix("YAPPER_PROGRESS ") {
+                    if let Ok(update) = serde_json::from_str::<EngineProgress>(json) {
+                        *progress_reader.lock().await = update;
+                        continue;
+                    }
+                }
                 eprintln!("[yapper-sidecar] {line}");
                 let mut tail = stderr_lines.lock().await;
                 if tail.len() == 8 { tail.pop_front(); }
@@ -594,6 +609,7 @@ impl SidecarSession {
         });
 
         Ok(Self {
+            progress,
             child,
             writer: Arc::new(Mutex::new(stdin)),
             pending,
@@ -881,6 +897,21 @@ mod startup_tests {
         assert!(side.is_alive());
         let errors = side.stderr_tail.lock().await;
         assert!(errors.iter().any(|line| line.contains("prompt \u{2014} English")));
+    }
+
+    #[tokio::test]
+    async fn startup_progress_is_separate_from_transcript_queue() {
+        let script = Script::new("import sys, time\nsys.stderr.write('YAPPER_PROGRESS {\"stage\":\"downloading\",\"message\":\"Downloading model\"}\\n')\nsys.stderr.flush()\nprint('{\"type\":\"ready\",\"engines\":[]}', flush=True)\ntime.sleep(10)\n");
+        let side = script.spawn().await;
+        side.wait_ready(Duration::from_secs(5)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if side.progress.lock().await.stage == "downloading" { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(side.progress.lock().await.message, "Downloading model");
+        assert!(side.stderr_tail.lock().await.is_empty());
     }
 
     #[tokio::test]

@@ -58,6 +58,7 @@ pub struct AppState {
     pub live_last_partial_text: Arc<Mutex<String>>,
     /// Live streaming preview shown on the HUD while push-to-talk is held.
     pub live_hud_preview: Arc<Mutex<String>>,
+    pub live_preview_status: Arc<Mutex<String>>,
     /// Sample index into the PTT buffer already sent to the streaming engine.
     pub live_audio_cursor: Arc<AtomicU32>,
     /// Active streaming session id (sidecar IPC).
@@ -93,6 +94,7 @@ impl AppState {
             yapper_node_logs: Arc::new(Mutex::new(VecDeque::new())),
             live_last_partial_text: Arc::new(Mutex::new(String::new())),
             live_hud_preview: Arc::new(Mutex::new(String::new())),
+            live_preview_status: Arc::new(Mutex::new(String::new())),
             live_audio_cursor: Arc::new(AtomicU32::new(0)),
             live_stream_session_id: Arc::new(AtomicU64::new(0)),
             inference_io_lock: Arc::new(Mutex::new(())),
@@ -104,4 +106,20 @@ impl AppState {
 
 pub fn next_seq(seq: &Arc<AtomicU64>) -> u64 {
     seq.fetch_add(1, Ordering::SeqCst)
+}
+
+/// Streaming reserves zero as its inactive sentinel.
+pub fn next_stream_seq(seq: &Arc<AtomicU64>) -> u64 {
+    next_seq(seq) + 1
+}
+
+#[cfg(test)]
+mod stream_id_tests {
+    use super::*;
+    #[test]
+    fn first_live_recording_has_a_nonzero_session() {
+        let seq = Arc::new(AtomicU64::new(0));
+        assert_eq!(next_stream_seq(&seq), 1);
+        assert_eq!(next_stream_seq(&seq), 2);
+    }
 }

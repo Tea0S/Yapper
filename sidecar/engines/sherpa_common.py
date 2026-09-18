@@ -1,6 +1,8 @@
 """Shared helpers for sherpa-onnx model download and ONNX Runtime provider selection."""
 from __future__ import annotations
 
+from .progress import report
+
 import shutil
 import tarfile
 import urllib.request
@@ -75,12 +77,14 @@ def ensure_punct_tarball(model_id: str, model_dir: str | None) -> Path:
 
 def _download_and_extract(url: str, archive: Path, dest: Path, root: Path) -> None:
     if not archive.is_file():
+        report("downloading", "Downloading speech model. The first download can take several minutes.")
         tmp = archive.with_suffix(".part")
         req = urllib.request.Request(url, headers={"User-Agent": "yapper-sidecar/1.0"})
         with urllib.request.urlopen(req, timeout=600) as resp, open(tmp, "wb") as out:
             shutil.copyfileobj(resp, out)
         tmp.replace(archive)
 
+    report("loading", "Unpacking speech model and preparing recognition...")
     extract_root = root / "_extract"
     if extract_root.is_dir():
         shutil.rmtree(extract_root, ignore_errors=True)

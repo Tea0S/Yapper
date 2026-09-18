@@ -1,522 +1,97 @@
 <script lang="ts">
-  import { formatShortcutDisplay } from "$lib/formatShortcutDisplay";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
 
-  type HudPhase = "hidden" | "idle" | "listening" | "transcribing";
-  type MicLevel = { rms: number; peak: number };
+  type Snapshot = {
+    phase: "hidden" | "idle" | "listening" | "transcribing";
+    preview: string; outcome: string; pending: number;
+    microphone: { device: string; notice: string; error: string };
+    preview_status: string;
+    engine_progress: { stage: string; message: string };
+  };
+  let snap = $state<Snapshot>({ phase: "idle", preview: "", outcome: "", pending: 0,
+    microphone: { device: "", notice: "", error: "" }, preview_status: "", engine_progress: { stage: "", message: "" } });
+  let peak = $state(0);
+  let busy = $state(false);
+  let error = $state("");
+  const recording = $derived(snap.phase === "listening");
+  const preparing = $derived(["checking", "downloading", "loading", "warming"].includes(snap.engine_progress.stage));
+  const label = $derived(recording ? "Listening" : snap.phase === "transcribing" ? "Processing" : preparing ? "Preparing" : snap.outcome === "Dictation pasted" ? "Inserted" : "Ready");
+  const previewTail = $derived(snap.preview.length > 150 ? "…" + snap.preview.slice(-149) : snap.preview);
+  const detail = $derived(error || snap.microphone.error || (preparing ? snap.engine_progress.message : "") ||
+    (recording ? previewTail || snap.preview_status || snap.microphone.notice : snap.outcome));
 
-  let phase = $state<HudPhase>("idle");
-  let preview = $state("");
-  let outcome = $state("");
-  let pending = $state(0);
-  let mic = $state<MicLevel>({ rms: 0, peak: 0 });
-  /** Layout/styling only — from Rust `cfg!(target_os = "macos")`, never UA sniffing. */
-  let isMacChrome = $state(false);
-  let pttHint = $state("Push-to-talk");
-  let toggleMicHint = $state("");
-
-  const dotCount = 9;
-  const DRAG_THRESHOLD_PX = 6;
-  /** Single-line ticker: show the newest words, not a scrolling paragraph. */
-  const PREVIEW_TAIL_CHARS = 42;
-
-  let pointerDown = false;
-  let pointerStartX = 0;
-  let pointerStartY = 0;
-  let dragStarted = false;
-
-  const expanded = $derived(phase === "listening" || phase === "transcribing");
-  const hasPreview = $derived(phase === "listening" && preview.trim().length > 0);
-  const previewTail = $derived(formatPreviewTail(preview, PREVIEW_TAIL_CHARS));
-  const showOutcome = $derived(phase === "idle" && outcome.trim().length > 0);
-
-  function formatPreviewTail(raw: string, maxChars: number): string {
-    const t = raw.replace(/\s+/g, " ").trim();
-    if (!t) return "";
-    if (t.length <= maxChars) return t;
-    return "…" + t.slice(-(maxChars - 1));
-  }
-
-  function dotLevel(i: number): number {
-    const center = (dotCount - 1) / 2;
-    const dist = Math.abs(i - center) / Math.max(center, 1);
-    const rest = 0.12 + (1 - dist) * 0.28;
-    const e = Math.min(1, mic.peak * 3.2 + mic.rms * 5.5);
-    return Math.min(1, rest + e * (0.55 + (1 - dist) * 0.45));
-  }
-
-  async function openYapper() {
-    try {
-      await invoke("focus_main_window");
-    } catch {
-      /* ignore */
-    }
-  }
-
-  /** Windows + macOS: small movement = click; past threshold = native window drag. */
-  function onPillPointerDown(e: PointerEvent) {
-    if (e.button !== 0) return;
-    pointerDown = true;
-    dragStarted = false;
-    pointerStartX = e.clientX;
-    pointerStartY = e.clientY;
-    (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
-  }
-
-  function onPillPointerMove(e: PointerEvent) {
-    if (!pointerDown || (e.buttons & 1) === 0) return;
-    const dx = e.clientX - pointerStartX;
-    const dy = e.clientY - pointerStartY;
-    if (!dragStarted && dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
-      dragStarted = true;
-      void getCurrentWindow()
-        .startDragging()
-        .catch(() => {});
-    }
-  }
-
-  function onPillPointerUp(e: PointerEvent) {
-    if (e.button !== 0) return;
-    pointerDown = false;
-    try {
-      (e.currentTarget as HTMLButtonElement).releasePointerCapture(e.pointerId);
-    } catch {
-      /* already released */
-    }
-    if (!dragStarted) {
-      void openYapper();
-    }
-  }
-
-  function onPillPointerCancel() {
-    pointerDown = false;
-    dragStarted = false;
-  }
-
-  function onPillKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      void openYapper();
-    }
+  async function toggle() {
+    if (busy) return;
+    error = "";
+    busy = true;
+    try { await invoke("hud_toggle_recording"); }
+    catch (e) { error = String(e); }
+    finally { busy = false; }
   }
 
   onMount(() => {
     let dead = false;
-    void (async () => {
-      let macos = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function tick() {
       try {
-        const info = await invoke<{ macos: boolean }>("hud_chrome_info");
-        macos = info.macos;
-      } catch {
-        /* browser / old build */
-      }
-      if (dead) return;
-      isMacChrome = macos;
-      try {
-        const rows = await invoke<{ action: string; shortcut: string }[]>("list_keybinds_cmd");
+        const next = await invoke<Snapshot>("hud_snapshot");
         if (dead) return;
-        const ptt = rows.find((r) => r.action === "push_to_talk" && r.shortcut.trim());
-        if (ptt) pttHint = formatShortcutDisplay(ptt.shortcut, { mac: macos });
-        const tom = rows.find((r) => r.action === "toggle_open_mic" && r.shortcut.trim());
-        if (tom) toggleMicHint = formatShortcutDisplay(tom.shortcut, { mac: macos });
-      } catch {
-        /* ignore */
-      }
-    })();
-
-    const tick = async () => {
-      if (dead) return;
-      try {
-        const snap = await invoke<{ phase: HudPhase; preview: string; outcome?: string; pending?: number }>(
-          "hud_snapshot",
-        );
-        phase = snap.phase;
-        preview = snap.preview ?? "";
-        outcome = snap.outcome ?? "";
-        pending = snap.pending ?? 0;
-      } catch {
-        phase = "hidden";
-      }
-      if (phase === "listening") {
-        try {
-          mic = await invoke<MicLevel>("get_mic_input_level");
-        } catch {
-          mic = { rms: 0, peak: 0 };
+        snap = next;
+        if (next.phase === "listening") {
+          const level = await invoke<{ peak: number }>("get_mic_input_level");
+          if (!dead) peak = level.peak;
         }
-      }
-    };
-    const id = setInterval(tick, 72);
+      } catch { /* Keep the last state during a transient IPC failure. */ }
+      if (!dead) timer = setTimeout(tick, 120);
+    }
     void tick();
-    return () => {
-      dead = true;
-      clearInterval(id);
-    };
+    return () => { dead = true; clearTimeout(timer); };
   });
 </script>
 
-<div class="hud-root">
-  <div class="hud-shell">
-    <div class="stack">
-      <div class="tooltip" role="tooltip">
-        <span class="tip-line"
-          >Hold <strong class="accent">{pttHint}</strong> to dictate · release to transcribe</span
-        >
-        {#if toggleMicHint}
-          <span class="tip-line tip-gap"
-            >Press <strong class="accent">{toggleMicHint}</strong> to toggle open mic</span
-          >
-        {/if}
-        <span class="tip-sub">Click to open Yapper · drag to move the widget</span>
-      </div>
-      {#if showOutcome}
-        <p class="outcome" role="status" aria-live="polite">{outcome}</p>
-      {/if}
-      <button
-        type="button"
-        class="pill"
-        class:expanded
-        class:previewing={hasPreview || phase === "transcribing"}
-        class:macos={isMacChrome}
-        aria-label="Open Yapper — or drag to move"
-        onpointerdown={onPillPointerDown}
-        onpointermove={onPillPointerMove}
-        onpointerup={onPillPointerUp}
-        onpointercancel={onPillPointerCancel}
-        onkeydown={onPillKeydown}
-      >
-        {#if expanded}
-          <div class="live-wrap">
-            <div class="dots" aria-hidden="true">
-              {#each Array.from({ length: dotCount }, (_, i) => i) as i (i)}
-                <span
-                  class="dot"
-                  class:busy={phase === "transcribing"}
-                  style="--lvl: {phase === 'listening' ? dotLevel(i) : 0.22}"
-                ></span>
-              {/each}
-            </div>
-            {#if hasPreview}
-              <p class="live-preview" aria-live="polite">{previewTail}</p>
-            {:else if phase === "transcribing"}
-              <p class="live-preview finishing" aria-live="polite">{pending > 1 ? `Processing ${pending} dictations…` : "Finishing…"}</p>
-            {/if}
-          </div>
-        {:else}
-          <span class="idle-cap" aria-hidden="true"></span>
-        {/if}
-      </button>
+<div class="widget" class:recording>
+  <div class="controls">
+    <button class="grip" title="Drag to move" aria-label="Move dictation widget"
+      onpointerdown={(e) => { if (e.button === 0) void getCurrentWindow().startDragging().catch(() => {}); }}>⠿</button>
+    <div class="state">
+      <span class="status-dot" class:pulse={recording || preparing || snap.phase === "transcribing"}></span>
+      <span role="status">{label}</span>
     </div>
+    <button class="record" disabled={busy} onclick={toggle}
+      title={recording ? "Stop recording and insert text" : "Dictate into the selected text field"}
+      aria-label={recording ? "Stop recording and insert text" : "Start dictation"}>
+      {recording ? "Stop" : busy ? "Wait…" : "Speak"}
+    </button>
+    <button class="open" title="Open Yapper" aria-label="Open Yapper" onclick={() => invoke("focus_main_window")}>↗</button>
   </div>
+  {#if recording}
+    <div class="meter" aria-hidden="true"><span style:width={`${Math.min(100, Math.sqrt(Math.max(0, peak)) * 150)}%`}></span></div>
+  {/if}
+  {#if detail}<p class="detail" class:preview={recording && Boolean(snap.preview) && detail === previewTail} role="status" title={detail}>{detail}</p>{/if}
 </div>
 
 <style>
-  :global(html),
-  :global(body) {
-    background: transparent !important;
-    margin: 0;
-    min-height: 100%;
-    overflow: visible;
-  }
-
-  .hud-root {
-    box-sizing: border-box;
-    min-height: 100%;
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: flex-end;
-    padding: 8px 6px 10px;
-    font-family: "DM Sans", system-ui, sans-serif;
-    -webkit-font-smoothing: antialiased;
-    overflow: visible;
-  }
-
-  .hud-root * {
-    box-sizing: border-box;
-  }
-
-  .hud-shell {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 100%;
-    max-width: 100%;
-  }
-
-  .stack {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    max-width: 100%;
-    overflow: visible;
-  }
-
-  .stack:hover .tooltip {
-    opacity: 1;
-  }
-
-  .stack:has(.outcome) .tooltip {
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  .outcome {
-    position: absolute;
-    bottom: calc(100% + 10px);
-    left: 50%;
-    transform: translateX(-50%);
-    width: max-content;
-    max-width: min(210px, 100%);
-    margin: 0;
-    padding: 8px 12px;
-    border-radius: 10px;
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1.35;
-    text-align: center;
-    color: rgba(248, 250, 252, 0.98);
-    background: rgba(12, 14, 18, 0.94);
-    border: 1px solid rgba(255, 255, 255, 0.28);
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
-    z-index: 11;
-    pointer-events: none;
-  }
-
-  .live-preview.finishing {
-    color: rgba(232, 180, 212, 0.95);
-    letter-spacing: 0.02em;
-  }
-
-  .tooltip {
-    position: absolute;
-    bottom: calc(100% + 10px);
-    left: 50%;
-    transform: translateX(-50%);
-    width: max-content;
-    max-width: min(300px, 100%);
-    padding: 9px 14px;
-    border-radius: 10px;
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.4;
-    text-align: center;
-    color: rgba(248, 250, 252, 0.95);
-    background: rgba(12, 14, 18, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(12px);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.16s ease;
-    z-index: 10;
-    white-space: normal;
-    word-wrap: break-word;
-  }
-
-  .tip-line {
-    display: block;
-  }
-
-  .tip-gap {
-    margin-top: 6px;
-  }
-
-  .tip-sub {
-    display: block;
-    margin-top: 4px;
-    font-size: 11px;
-    font-weight: 400;
-    color: rgba(248, 250, 252, 0.65);
-  }
-
-  .accent {
-    color: #e8b4d4;
-    font-weight: 600;
-  }
-
-  .pill {
-    margin: 0;
-    padding: 0;
-    appearance: none;
-    -webkit-appearance: none;
-    cursor: grab;
-    border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.38);
-    background: rgba(6, 8, 10, 0.45);
-    backdrop-filter: blur(10px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition:
-      min-width 0.18s ease,
-      min-height 0.18s ease,
-      padding 0.18s ease,
-      border-color 0.15s ease;
-    min-width: 72px;
-    min-height: 22px;
-    padding: 5px 14px;
-    outline: none;
-  }
-
-  .pill:focus-visible {
-    outline: 2px solid rgba(232, 180, 212, 0.65);
-    outline-offset: 2px;
-  }
-
-  .pill:hover {
-    border-color: rgba(255, 255, 255, 0.52);
-    background: rgba(10, 12, 16, 0.55);
-  }
-
-  .pill:active {
-    cursor: grabbing;
-  }
-
-  /* Meter-only: stay compact, centered in the window. */
-  .pill.expanded {
-    width: auto;
-    max-width: 100%;
-    min-width: 88px;
-    min-height: 36px;
-    padding: 8px 16px;
-  }
-
-  /* Live ticker: fill the slightly larger preview window. */
-  .pill.expanded.previewing {
-    align-self: stretch;
-    width: 100%;
-    min-width: 0;
-    padding: 8px 12px;
-  }
-
-  /* macOS: same footprint as other platforms; local glass via backdrop-filter (no full-window vibrancy). */
-  .pill.macos {
-    background: rgba(255, 255, 255, 0.14);
-    border-color: rgba(255, 255, 255, 0.45);
-    backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.25),
-      0 4px 20px rgba(0, 0, 0, 0.2);
-  }
-
-  .pill.macos:hover {
-    background: rgba(255, 255, 255, 0.2);
-    border-color: rgba(255, 255, 255, 0.52);
-  }
-
-  .idle-cap {
-    display: block;
-    width: 44px;
-    height: 3px;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .dots {
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 4px;
-    height: 22px;
-    width: 100%;
-    max-width: 100%;
-    padding: 0 2px;
-  }
-
-  .live-wrap {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 5px;
-    width: 100%;
-    min-width: 0;
-  }
-
-  /* Trailing one-liner — newest speech stays visible without scrolling. */
-  .live-preview {
-    margin: 0;
-    padding: 0 2px;
-    font-size: 11px;
-    line-height: 1.25;
-    font-weight: 500;
-    color: rgba(248, 250, 252, 0.92);
-    text-align: center;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: clip;
-    max-width: 100%;
-  }
-
-  .pill.macos .dots {
-    height: 20px;
-  }
-
-  .dot {
-    width: 4px;
-    flex-shrink: 0;
-    height: 18px;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.88);
-    transform: scaleY(var(--lvl));
-    transform-origin: center bottom;
-    transition: transform 0.06s ease-out, opacity 0.2s ease;
-    opacity: 0.92;
-  }
-
-  .pill.macos .dot {
-    height: 16px;
-  }
-
-  .dot.busy {
-    animation: breathe 0.9s ease-in-out infinite;
-    animation-delay: calc(var(--i, 0) * 0.06s);
-    opacity: 0.55;
-  }
-
-  .dot.busy:nth-child(1) {
-    --i: 0;
-  }
-  .dot.busy:nth-child(2) {
-    --i: 1;
-  }
-  .dot.busy:nth-child(3) {
-    --i: 2;
-  }
-  .dot.busy:nth-child(4) {
-    --i: 3;
-  }
-  .dot.busy:nth-child(5) {
-    --i: 4;
-  }
-  .dot.busy:nth-child(6) {
-    --i: 5;
-  }
-  .dot.busy:nth-child(7) {
-    --i: 6;
-  }
-  .dot.busy:nth-child(8) {
-    --i: 7;
-  }
-  .dot.busy:nth-child(9) {
-    --i: 8;
-  }
-
-  @keyframes breathe {
-    0%,
-    100% {
-      transform: scaleY(0.25);
-      opacity: 0.45;
-    }
-    50% {
-      transform: scaleY(0.85);
-      opacity: 0.85;
-    }
-  }
+  :global(html), :global(body) { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent !important; }
+  .widget { box-sizing: border-box; width: 100vw; height: 100vh; padding: 4px 8px; border-radius: 16px;
+    background: #151920; color: #f5f7fa; border: 1px solid #727c8b; font: 12px/1.35 system-ui, sans-serif; overflow: hidden; }
+  .controls { display: flex; align-items: center; gap: 5px; height: 30px; }
+  button { padding: 3px 5px; border: 0; border-radius: 6px; color: inherit; background: transparent; font: inherit; cursor: pointer; }
+  button:hover { background: #343b46; }
+  button:focus-visible { outline: 2px solid #e8b4d4; outline-offset: -2px; }
+  button:disabled { opacity: .6; }
+  .grip { cursor: grab; font-size: 16px; }
+  .state { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; font-weight: 600; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #a6d9b0; flex-shrink: 0; }
+  .record { background: #e8b4d4; color: #19131a; font-weight: 700; }
+  .record:hover { background: #f1cce3; }
+  .recording .status-dot { background: #f7a7b4; }
+  .meter { height: 3px; margin: 2px 5px 4px; background: #343b46; border-radius: 3px; overflow: hidden; }
+  .meter span { display: block; height: 100%; background: #e8b4d4; transition: width .1s; }
+  .detail { margin: 4px 5px 0; font-size: 12px; line-height: 1.4; max-height: 50px; overflow: auto; overflow-wrap: anywhere; }
+  .detail.preview { overflow: auto; }
+  .pulse { animation: pulse 1s ease-in-out infinite alternate; }
+  @keyframes pulse { to { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } .meter span { transition: none; } }
 </style>

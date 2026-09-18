@@ -56,9 +56,16 @@ def vlog(msg: str) -> None:
         sys.stderr.flush()
 
 
+from engines.progress import report as report_progress
+
+
 def emit(obj: dict) -> None:
     t = obj.get("type", "?")
     extra = ""
+    if t == "error":
+        report_progress("error", str(obj.get("message", "Speech engine error")))
+    if t == "stream_partial":
+        report_progress("ready", "Ready to dictate")
     if t == "final":
         extra = f" seq={obj.get('seq')} text_chars={len(obj.get('text') or '')}"
     elif t == "error":
@@ -255,23 +262,34 @@ def load_whisper(model: str, device: str, compute_type: str, model_dir: Optional
                 assert download_root is not None
                 flat_dir.mkdir(parents=True, exist_ok=True)
                 if not (flat_dir / "model.bin").is_file():
+                    report_progress("downloading", "Downloading recognition model. This only happens when files are missing.")
                     download_model(
                         model,
                         output_dir=str(flat_dir),
                         cache_dir=download_root,
                         local_files_only=False,
                     )
+                report_progress("loading", "Loading recognition model into memory...")
                 MODEL = WhisperModel(
                     str(flat_dir),
                     device=dev,
                     compute_type=compute_type,
                 )
             else:
+                if Path(model).is_dir():
+                    resolved_model = model
+                else:
+                    report_progress("checking", "Checking saved model files...")
+                    try:
+                        resolved_model = download_model(model, cache_dir=download_root, local_files_only=True)
+                    except Exception:
+                        report_progress("downloading", "Downloading recognition model. The first download can take several minutes.")
+                        resolved_model = download_model(model, cache_dir=download_root)
+                report_progress("loading", "Loading recognition model into memory...")
                 MODEL = WhisperModel(
-                    model,
+                    resolved_model,
                     device=dev,
                     compute_type=compute_type,
-                    download_root=download_root,
                 )
             break
         except Exception as e:
@@ -338,6 +356,7 @@ def load_mlx_whisper(model: str, model_dir: Optional[str]) -> None:
         f"yapper-sidecar: MLX loading weights (HF download if needed) repo={model!r} …\n"
     )
     sys.stderr.flush()
+    report_progress("loading", "Preparing MLX model; missing files will download on first use...")
     ModelHolder.get_model(model, dtype=dtype)
     USE_MLX = True
     MODEL = object()
@@ -377,6 +396,7 @@ def store_config(
 def load_parakeet_for_config(model: str, device: str, model_dir: Optional[str]) -> None:
     global MODEL, MODEL_NAME, USE_MLX
     USE_MLX = False
+    report_progress("loading", "Preparing Parakeet recognition model...")
     parakeet_sherpa.load(model, device, model_dir)
     MODEL = object()
     MODEL_NAME = parakeet_sherpa.model_id()
@@ -810,6 +830,7 @@ def handle_init(msg: dict) -> None:
             unload_whisper()
             parakeet_sherpa.unload()
             MODEL = None
+            report_progress("standby", "Model resting; it will load when you start recording")
             emit({"type": "model_state", "loaded": False})
             emit(
                 {
@@ -827,6 +848,7 @@ def handle_init(msg: dict) -> None:
             return
         DEVICE = dev
         warm_model()
+        report_progress("ready", "Ready to dictate")
         emit({"type": "model_state", "loaded": True})
         emit(
             {
@@ -862,6 +884,7 @@ def handle_init(msg: dict) -> None:
         )
         sys.stderr.flush()
         unload_whisper()
+        report_progress("standby", "Model resting; it will load when you start recording")
         emit({"type": "model_state", "loaded": False})
         emit(
             {
@@ -882,6 +905,7 @@ def handle_init(msg: dict) -> None:
         return
     DEVICE = "mlx" if USE_MLX else dev
     warm_model()
+    report_progress("ready", "Ready to dictate")
     emit({"type": "model_state", "loaded": True})
     emit(
         {
@@ -896,6 +920,7 @@ def handle_init(msg: dict) -> None:
 
 def warm_model() -> None:
     """Pay the first decoder/kernel setup cost before reporting an eager engine ready."""
+    report_progress("warming", "Warming up recognition for your first dictation...")
     if MOCK:
         return
     try:
@@ -920,9 +945,11 @@ def handle_ensure_model() -> None:
     vlog(f"handle_ensure_model MODEL_is_none={MODEL is None}")
     if MOCK:
         MODEL_NAME = CONFIG.get("model", "base")
+        report_progress("ready", "Ready to dictate")
         emit({"type": "model_state", "loaded": True})
         return
     if MODEL is not None:
+        report_progress("ready", "Ready to dictate")
         emit({"type": "model_state", "loaded": True})
         return
     try:
@@ -930,11 +957,13 @@ def handle_ensure_model() -> None:
     except Exception as e:
         emit({"type": "error", "message": f"Model load failed: {e}"})
         return
+    warm_model()
     engine = (CONFIG.get("engine") or "whisper").lower()
     DEVICE = "mlx" if USE_MLX else CONFIG["device"]
     MODEL_NAME = CONFIG["model"]
     if engine == "parakeet":
         MODEL_NAME = parakeet_sherpa.model_id()
+    report_progress("ready", "Ready to dictate")
     emit({"type": "model_state", "loaded": True})
 
 
@@ -942,6 +971,7 @@ def handle_unload_model() -> None:
     unload_whisper()
     parakeet_sherpa.unload()
     punct_restore.unload()
+    report_progress("standby", "Model resting; it will load when you start recording")
     emit({"type": "model_state", "loaded": False})
 
 
