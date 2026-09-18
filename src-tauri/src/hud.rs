@@ -13,6 +13,12 @@ pub(crate) fn widget_enabled(app: &AppHandle) -> Result<bool, String> {
     Ok(v.as_deref() != Some("false"))
 }
 
+pub(crate) fn widget_style(app: &AppHandle) -> Result<String, String> {
+    let conn = crate::open_db(app)?;
+    let value = crate::db::get_setting(&conn, "hud_widget_style").map_err(|e| e.to_string())?;
+    Ok(if value.as_deref() == Some("controls") { "controls" } else { "classic" }.into())
+}
+
 // Window bounds match the visible surface; no invisible tooltip reservation.
 const SIZE_COLLAPSED: (f64, f64) = (180.0, 40.0);
 const SIZE_LISTENING: (f64, f64) = (240.0, 52.0);
@@ -62,7 +68,9 @@ fn shape_window(win: &WebviewWindow) -> Result<(), String> {
     {
         use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
         let size = win.outer_size().map_err(|e| e.to_string())?;
-        let radius = (32.0 * win.scale_factor().map_err(|e| e.to_string())?).round() as i32;
+        let radius = if widget_style(win.app_handle())? == "classic" {
+            size.height as i32
+        } else { (32.0 * win.scale_factor().map_err(|e| e.to_string())?).round() as i32 };
         let hwnd = win.hwnd().map_err(|e| e.to_string())?;
         unsafe {
             let region = CreateRoundRectRgn(0, 0, size.width as i32 + 1, size.height as i32 + 1, radius, radius);
@@ -121,13 +129,14 @@ pub fn ensure_collapsed_visible(app: &AppHandle) -> Result<(), String> {
     let url = hud_url(app)?;
     if let Some(w) = app.get_webview_window(LABEL) {
         w.navigate(url).map_err(|e| e.to_string())?;
-        set_logical_size_keep_hcenter(&w, SIZE_COLLAPSED.0, SIZE_COLLAPSED.1)?;
+        set_layout(app, HudLayout::Collapsed)?;
         w.show().map_err(|e| e.to_string())?;
         let _ = w.set_always_on_top(true);
         return Ok(());
     }
 
     let win = build_hud_window(app, url)?;
+    set_layout(app, HudLayout::Collapsed)?;
     shape_window(&win)?;
     position_bottom_center(&win)?;
     win.show().map_err(|e| e.to_string())?;
@@ -142,11 +151,17 @@ pub fn set_layout(app: &AppHandle, layout: HudLayout) -> Result<(), String> {
     let w = app
         .get_webview_window(LABEL)
         .ok_or_else(|| "hud window missing".to_string())?;
-    let (lw, lh) = match layout {
+    let (lw, lh) = if widget_style(app)? == "classic" {
+        match layout {
+            HudLayout::Collapsed => (72.0, 22.0),
+            HudLayout::Listening => (88.0, 36.0),
+            HudLayout::Preview => (300.0, 64.0),
+        }
+    } else { match layout {
         HudLayout::Collapsed => SIZE_COLLAPSED,
         HudLayout::Listening => SIZE_LISTENING,
         HudLayout::Preview => SIZE_PREVIEW,
-    };
+    }};
     set_logical_size_keep_hcenter(&w, lw, lh)?;
     Ok(())
 }

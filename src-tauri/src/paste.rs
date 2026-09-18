@@ -79,7 +79,7 @@ pub fn paste_to_target(app: &tauri::AppHandle, target: PasteTarget, text: String
         let result = (|| {
             let current = capture_target().ok_or("Destination is unavailable. Copy the transcript from Home.")?;
             if current.window != target.window || current.control != target.control || current.app_key != target.app_key
-                || target.element.is_none() || current.element != target.element {
+                || matches!((&target.element, &current.element), (Some(expected), Some(actual)) if expected != actual) {
                 return Err("Destination changed. Copy the transcript from Home.".to_string());
             }
             if multiline && !text_has_spoken_key_sentinels(&text) {

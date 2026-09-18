@@ -6,7 +6,6 @@
   import { afterNavigate } from "$app/navigation";
   import { onMount } from "svelte";
   import { createShortcutCaptureSession } from "$lib/keybindCapture";
-  import { bindYapperShortcuts } from "$lib/shortcuts";
   import {
     applyUiTheme,
     loadHighContrast,
@@ -74,7 +73,8 @@
   let tonePreset = $state("standard");
   let grammarRestore = $state("auto");
   let mock = $state(false);
-  let cuda = $state(false);
+  let cuda = $state<boolean | null>(null);
+  let gpuError = $state("");
   let whisperDevice = $state("auto");
   let inputDeviceId = $state("");
   let micDevices = $state<{ id: string; label: string }[]>([]);
@@ -100,6 +100,9 @@
   }
 
   onMount(() => {
+    void initializeSettings();
+    void refreshMicrophones();
+    void invoke<boolean>("cuda_available").then(value => cuda = value).catch(e => gpuError = String(e));
     const timer = setInterval(() => {
       if (restartingEngine && document.visibilityState === "visible") void invoke<{ message: string }>("engine_progress").then(p => engineProgress = p.message).catch(() => {});
     }, 2000);
@@ -111,6 +114,29 @@
   let dictionaryHints = $state(true);
   let presetMessage = $state("");
   let settingsError = $state("");
+  let settingsLoading = $state(true);
+  let settingsLoaded = $state(false);
+  let settingsSaving = $state(false);
+  let settingsMessage = $state("");
+  let loadError = $state("");
+  let savedKeybinds: Record<string, string> = {};
+
+  async function initializeSettings() {
+    settingsLoading = true;
+    settingsLoaded = false;
+    loadError = "";
+    try {
+      await load();
+      settingsLoaded = true;
+    } catch (e) {
+      loadError = `Could not load saved settings: ${String(e)}`;
+    } finally { settingsLoading = false; }
+  }
+
+  function requireLoadedSettings() {
+    if (!settingsLoaded) throw new Error("Wait for saved settings to load before saving.");
+  }
+
 
   let restartingEngine = $state(false);
   const selectedSpeed = $derived.by(() => {
@@ -144,6 +170,7 @@
   let micMaxGain = $state("12");
   let lazyLoadWhisper = $state(false);
   let hudWidgetEnabled = $state(true);
+  let hudWidgetStyle = $state("classic");
   let modelIdleUnloadMins = $state("0");
   const selectedReadiness = $derived(!lazyLoadWhisper && modelIdleUnloadMins === "0" ? "ready" : lazyLoadWhisper && modelIdleUnloadMins === "5" ? "memory" : "custom");
 
@@ -323,7 +350,7 @@
       key: "mock_transcription",
     });
     mock = m === "true";
-    cuda = await invoke("cuda_available");
+
     whisperDevice =
       (await invoke<string | null>("get_setting_cmd", { key: "whisper_device" })) ?? "auto";
     if (appIsMac && whisperDevice === "cuda") {
@@ -345,9 +372,10 @@
       (await invoke<string | null>("get_setting_cmd", { key: "mic_normalize_peak" })) ?? "0.88";
     micMaxGain =
       (await invoke<string | null>("get_setting_cmd", { key: "mic_max_gain" })) ?? "12";
-    await refreshMicrophones();
+
     lazyLoadWhisper =
       (await invoke<string | null>("get_setting_cmd", { key: "lazy_load_whisper" })) === "true";
+    hudWidgetStyle = (await invoke<string | null>("get_setting_cmd", { key: "hud_widget_style" })) === "controls" ? "controls" : "classic";
     hudWidgetEnabled =
       (await invoke<string | null>("get_setting_cmd", { key: "hud_widget_enabled" })) !== "false";
     modelIdleUnloadMins =
@@ -413,6 +441,7 @@
     const binds = await invoke<{ action: string; shortcut: string }[]>(
       "list_keybinds_cmd",
     );
+    savedKeybinds = Object.fromEntries(binds.map(b => [b.action, b.shortcut]));
     for (const b of binds) {
       if (b.action === "push_to_talk") kPtt = b.shortcut;
       if (b.action === "toggle_open_mic") kMic = b.shortcut;
@@ -609,9 +638,8 @@
     return () => window.clearInterval(poll);
   });
 
-  afterNavigate(({ from, to }) => {
-    // Initial navigation loads once; in-page links must not rescan or overwrite unsaved choices.
-    if (to?.url.pathname === "/settings" && from?.url.pathname !== "/settings") void load();
+  afterNavigate(({ to }) => {
+    // Settings and device discovery load once on mount, never on hash navigation.
     if (to?.url.hash) {
       const target = document.getElementById(to.url.hash.slice(1));
       let details = target?.closest("details");
@@ -647,6 +675,7 @@
   }
 
   async function saveCore() {
+    requireLoadedSettings();
     await invoke("set_setting_cmd", { key: "background_dictation", value: String(backgroundDictation) });
     await invoke("set_setting_cmd", { key: "dictionary_recognition_hints", value: String(dictionaryHints) });
     await invoke("set_setting_cmd", {
@@ -743,6 +772,26 @@
     }
   }
 
+  async function saveOutputStyle() {
+    if (!settingsLoaded || settingsSaving) return;
+    settingsSaving = true;
+    settingsError = "";
+    settingsMessage = "";
+    try {
+      await invoke("set_setting_cmd", { key: "tone_preset", value: tonePreset });
+      await invoke("set_setting_cmd", { key: "grammar_restore", value: grammarRestore });
+      settingsMessage = "Output style saved.";
+    } catch (e) { settingsError = String(e); }
+    finally { settingsSaving = false; }
+  }
+
+  async function persistHudStyle() {
+    try {
+      await invoke("set_setting_cmd", { key: "hud_widget_style", value: hudWidgetStyle });
+      await invoke("hud_sync_visibility_cmd");
+    } catch (e) { settingsError = String(e); }
+  }
+
   async function persistHudWidget() {
     try {
       await invoke("set_setting_cmd", {
@@ -750,13 +799,11 @@
         value: hudWidgetEnabled ? "true" : "false",
       });
       await invoke("hud_sync_visibility_cmd");
-    } catch {
-      /* ignore */
-    }
+    } catch (e) { settingsError = String(e); }
   }
 
   async function saveMicrophoneOnly() {
-    if (microphoneSaving) return;
+    if (!settingsLoaded || microphoneSaving) return;
     microphoneSaving = true;
     microphoneMessage = "";
     microphoneError = "";
@@ -784,23 +831,22 @@
   }
 
   async function saveKeybinds() {
+    if (!settingsLoaded || settingsSaving) return;
+    settingsSaving = true;
+    settingsError = "";
+    settingsMessage = "";
     conflict = [];
-    let c = await invoke<string[]>("set_keybind_cmd", {
-      action: "push_to_talk",
-      shortcut: kPtt,
-    });
-    if (c.length) conflict = [...conflict, ...c];
-    c = await invoke<string[]>("set_keybind_cmd", {
-      action: "toggle_open_mic",
-      shortcut: kMic,
-    });
-    if (c.length) conflict = [...conflict, ...c];
-    c = await invoke<string[]>("set_keybind_cmd", {
-      action: "stop_dictation",
-      shortcut: kStop,
-    });
-    if (c.length) conflict = [...conflict, ...c];
-    await bindYapperShortcuts();
+    try {
+      for (const [action, shortcut] of Object.entries({ push_to_talk: kPtt, toggle_open_mic: kMic, stop_dictation: kStop })) {
+        if (shortcut === savedKeybinds[action]) continue;
+        const conflicts = await invoke<string[]>("set_keybind_cmd", { action, shortcut });
+        if (conflicts.length) conflict = [...conflict, ...conflicts];
+        else savedKeybinds[action] = shortcut;
+      }
+      const status = await invoke<string>("refresh_global_shortcuts");
+      settingsMessage = conflict.length ? "Resolve shortcut conflicts, then save again." : `Shortcuts saved. ${status}`;
+    } catch (e) { settingsError = String(e); }
+    finally { settingsSaving = false; }
   }
 
   async function restartEngine() {
@@ -833,6 +879,14 @@
 
 <section>
   <h1>Settings</h1>
+  {#if settingsLoading}<p role="status">Loading saved settings…</p>{/if}
+  {#if loadError}
+    <p class="warn" role="alert">{loadError}</p>
+    <button class="btn" onclick={initializeSettings}>Retry loading settings</button>
+  {/if}
+  {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
+  {#if settingsMessage}<p role="status">{settingsMessage}</p>{/if}
+  <fieldset class="settings-fields" disabled={!settingsLoaded || settingsSaving}>
 
   <div class="panel block">
     <h2>Appearance</h2>
@@ -1505,8 +1559,12 @@
         Needed for GPU-accelerated Whisper on Windows (large one-time download, ~800&nbsp;MB). Model files are separate.
         Linux uses your Python environment instead.
       </p>
-      {#if !cuda}
-        <p class="warn">No NVIDIA GPU was detected. Install the latest GPU driver from NVIDIA first.</p>
+      {#if gpuError}
+        <p class="warn" role="alert">Could not check NVIDIA GPU: {gpuError}</p>
+      {:else if cuda === null}
+        <p class="muted">Checking NVIDIA GPU…</p>
+      {:else if !cuda}
+        <p class="warn">NVIDIA driver check did not succeed. Check that your NVIDIA driver is installed.</p>
       {/if}
       <button
         type="button"
@@ -1660,7 +1718,9 @@
       </p>
     </div>
     </details>
-    <button type="button" class="btn" onclick={saveCore}>Save style</button>
+    <button type="button" class="btn" onclick={saveOutputStyle}>Save style</button>
+    {#if settingsMessage}<p role="status">{settingsMessage}</p>{/if}
+    {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
   </div>
 
   <div class="panel block">
@@ -1677,6 +1737,15 @@
       />
       Show desktop dictation widget
     </label>
+    <label class="field">
+      Widget style
+      <select bind:value={hudWidgetStyle} onchange={() => void persistHudStyle()}>
+        <option value="classic">Classic pill</option>
+        <option value="controls">Speak/Stop controls</option>
+      </select>
+    </label>
+    <p class="muted short">Classic keeps the original compact bar and audio dots. Controls adds visible recording buttons.</p>
+    {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
   </div>
 
   <div class="panel block">
@@ -1775,10 +1844,14 @@
     <button type="button" class="btn btn-primary" onclick={saveKeybinds}>
       Save keybinds
     </button>
+    {#if settingsMessage}<p role="status">{settingsMessage}</p>{/if}
+    {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
   </div>
+  </fieldset>
 </section>
 
 <style>
+  .settings-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
   .advanced { margin: 1rem 0; border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem 1rem; }
   .advanced > summary { cursor: pointer; font-weight: 600; color: var(--text); }
   .advanced[open] > summary { margin-bottom: 1rem; }

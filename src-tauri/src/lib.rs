@@ -1991,6 +1991,7 @@ async fn transcribe_file(
 
 #[derive(Serialize)]
 struct HudSnapshot {
+    style: String,
     phase: HudPhase,
     preview: String,
     /// Brief post-dictation status (empty hold, pasted count). Empty when idle/expired.
@@ -2065,7 +2066,7 @@ async fn hud_snapshot(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         else if phase == HudPhase::Listening || phase == HudPhase::Transcribing { hud::HudLayout::Listening }
         else { hud::HudLayout::Collapsed };
     let _ = hud::set_layout(&app, layout);
-    Ok(HudSnapshot { phase, preview, outcome, pending, microphone, preview_status, engine_progress })
+    Ok(HudSnapshot { style: hud::widget_style(&app)?, phase, preview, outcome, pending, microphone, preview_status, engine_progress })
 }
 
 /// Latest dictation outcome for the main window (Home tips / status). Same TTL as HUD.
@@ -2123,12 +2124,13 @@ fn sync_windows_taskbar_icon(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-async fn cuda_available() -> bool {
-    let mut cmd = std::process::Command::new("nvidia-smi");
-    crate::win_spawn::hide_console(&mut cmd);
-    cmd.output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+async fn cuda_available() -> Result<bool, String> {
+    tokio::task::spawn_blocking(|| {
+        let mut cmd = std::process::Command::new("nvidia-smi");
+        crate::win_spawn::hide_console(&mut cmd);
+        cmd.output().map(|o| o.status.success())
+            .map_err(|e| format!("Could not run NVIDIA driver check: {e}"))
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

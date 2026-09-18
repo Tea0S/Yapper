@@ -1,16 +1,18 @@
 <script lang="ts">
+  import ClassicPill from "$lib/ClassicPill.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
 
   type Snapshot = {
+    style: "classic" | "controls";
     phase: "hidden" | "idle" | "listening" | "transcribing";
     preview: string; outcome: string; pending: number;
     microphone: { device: string; notice: string; error: string };
     preview_status: string;
     engine_progress: { stage: string; message: string };
   };
-  let snap = $state<Snapshot>({ phase: "idle", preview: "", outcome: "", pending: 0,
+  let snap = $state<Snapshot>({ style: "classic", phase: "idle", preview: "", outcome: "", pending: 0,
     microphone: { device: "", notice: "", error: "" }, preview_status: "", engine_progress: { stage: "", message: "" } });
   let peak = $state(0);
   let busy = $state(false);
@@ -51,6 +53,9 @@
   });
 </script>
 
+{#if snap.style === "classic"}
+  <ClassicPill {recording} processing={snap.phase === "transcribing" || preparing} {peak} {detail} {label} />
+{:else}
 <div class="widget" class:recording>
   <div class="controls">
     <button class="grip" title="Drag to move" aria-label="Move dictation widget"
@@ -71,6 +76,8 @@
   {/if}
   {#if detail}<p class="detail" class:preview={recording && Boolean(snap.preview) && detail === previewTail} role="status" title={detail}>{detail}</p>{/if}
 </div>
+
+{/if}
 
 <style>
   :global(html), :global(body) { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent !important; }
