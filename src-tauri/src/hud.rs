@@ -44,6 +44,7 @@ fn hud_url(app: &AppHandle) -> Result<Url, String> {
 
 /// Resize HUD and shift **X** so the window’s horizontal center stays fixed (logical size → may change outer px).
 fn set_logical_size_keep_hcenter(win: &WebviewWindow, lw: f64, lh: f64) -> Result<(), String> {
+    ensure_borderless_frame(win)?;
     let pos = win.outer_position().map_err(|e| e.to_string())?;
     let old_sz = win.outer_size().map_err(|e| e.to_string())?;
     let scale = win.scale_factor().map_err(|e| e.to_string())?;
@@ -62,8 +63,34 @@ fn set_logical_size_keep_hcenter(win: &WebviewWindow, lw: f64, lh: f64) -> Resul
     Ok(())
 }
 
+/// Tao hides decorations through WM_NCCALCSIZE but retains WS_CAPTION.
+/// A custom region can expose that native frame. Remove its styles before shaping,
+/// and repair them if a later Tao visibility/topmost update restores them.
+fn ensure_borderless_frame(win: &WebviewWindow) -> Result<(), String> {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
+            WS_CAPTION, WS_THICKFRAME, WS_SYSMENU, WS_MINIMIZEBOX, WS_MAXIMIZEBOX,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        };
+        let hwnd = windows::Win32::Foundation::HWND(win.hwnd().map_err(|e| e.to_string())?.0);
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let borderless = style & !(WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0
+            | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0);
+        if style != borderless {
+            SetWindowLongW(hwnd, GWL_STYLE, borderless as i32);
+            SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 /// Clip native hit testing too, so rounded transparent corners belong to the app behind us.
 fn shape_window(win: &WebviewWindow) -> Result<(), String> {
+    ensure_borderless_frame(win)?;
     #[cfg(windows)]
     {
         use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
@@ -132,6 +159,7 @@ pub fn ensure_collapsed_visible(app: &AppHandle) -> Result<(), String> {
         set_layout(app, HudLayout::Collapsed)?;
         w.show().map_err(|e| e.to_string())?;
         let _ = w.set_always_on_top(true);
+        shape_window(&w)?;
         return Ok(());
     }
 
@@ -141,6 +169,7 @@ pub fn ensure_collapsed_visible(app: &AppHandle) -> Result<(), String> {
     position_bottom_center(&win)?;
     win.show().map_err(|e| e.to_string())?;
     let _ = win.set_always_on_top(true);
+    shape_window(&win)?;
     Ok(())
 }
 

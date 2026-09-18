@@ -109,7 +109,7 @@
   }
 
   let showWhatsNew = $state(false);
-  const WHATS_NEW_VERSION = "1.3.6";
+  const WHATS_NEW_VERSION = "1.3.7";
 
   type MicLevel = { rms: number; peak: number };
   let micLevel = $state<MicLevel>({ rms: 0, peak: 0 });
@@ -359,12 +359,13 @@
 
 <section class="hero">
   {#if showWhatsNew}
-    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.6">
+    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.7">
       <div class="whats-new-head">
-        <h2 class="whats-new-title">What’s new in 1.3.6</h2>
+        <h2 class="whats-new-title">What’s new in 1.3.7</h2>
         <button type="button" class="btn mini" onclick={dismissWhatsNew}>Dismiss</button>
       </div>
       <ul class="whats-new-list">
+        <li>Fixed the Windows title bar and close button appearing inside the desktop pill</li>
         <li>Classic pill restored by default, with Speak/Stop controls as an optional widget style</li>
         <li>Saved settings and shortcuts load before editing; save failures are shown clearly</li>
         <li>Microphone discovery and GPU checks run independently of settings loading</li>
