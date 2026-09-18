@@ -12,6 +12,12 @@ import warnings
 from pathlib import Path
 from typing import Any, Optional
 
+# Keep the JSON protocol and diagnostics independent of the Windows code page,
+# including when launched directly rather than through the desktop application.
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="backslashreplace" if _stream is sys.stderr else "strict")
+
 # Ensure `engines/` resolves when the sidecar is launched from Tauri (any cwd).
 _SIDECAR_DIR = Path(__file__).resolve().parent
 if str(_SIDECAR_DIR) not in sys.path:
@@ -58,7 +64,7 @@ def emit(obj: dict) -> None:
     elif t == "error":
         extra = f" msg={str(obj.get('message', ''))[:100]}"
     vlog(f"emit → stdout type={t}{extra}")
-    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    line = json.dumps(obj, ensure_ascii=True) + "\n"
     sys.stdout.write(line)
     sys.stdout.flush()
     vlog(f"emit flushed (line_len={len(line)})")

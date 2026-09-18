@@ -464,7 +464,8 @@ impl SidecarSession {
             };
             cmd.env("PYTHONPATH", merged);
         }
-        cmd.arg(script.as_os_str())
+        // Embedded Windows Python ignores environment flags; force UTF-8 before any output.
+        cmd.arg("-X").arg("utf8").arg(script.as_os_str())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -531,8 +532,17 @@ impl SidecarSession {
         let alive = Arc::new(AtomicBool::new(true));
         let alive_reader = Arc::clone(&alive);
         tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
+            let mut reader = BufReader::new(stdout).split(b'\n');
+            while let Ok(Some(bytes)) = reader.next_segment().await {
+                let line = match String::from_utf8(bytes) {
+                    Ok(line) => line,
+                    Err(_) => {
+                        let mut q = pending_reader.lock().await;
+                        if q.len() >= 256 { q.pop_front(); }
+                        q.push_back(SidecarOut::Error { message: "The inference engine sent invalid UTF-8. Please retry the recording.".to_string() });
+                        continue;
+                    }
+                };
                 match serde_json::from_str::<SidecarOut>(&line) {
                     Ok(msg) => {
                         ipc_log(format!(
@@ -570,8 +580,11 @@ impl SidecarSession {
         let stderr_closed = Arc::new(tokio::sync::Notify::new());
         let stderr_done = stderr_closed.clone();
         tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
+            // Native libraries may write legacy bytes: always drain diagnostics.
+            let mut reader = BufReader::new(stderr).split(b'\n');
+            while let Ok(Some(bytes)) = reader.next_segment().await {
+                let decoded = String::from_utf8_lossy(&bytes);
+                let line = decoded.trim_end_matches('\r');
                 eprintln!("[yapper-sidecar] {line}");
                 let mut tail = stderr_lines.lock().await;
                 if tail.len() == 8 { tail.pop_front(); }
@@ -851,6 +864,23 @@ mod startup_tests {
             .await.expect("startup must not wait thirty minutes for a dead process").unwrap_err();
         assert!(error.contains("during startup"), "{error}");
         assert!(error.contains("decoder failed to initialize"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn unicode_transcript_does_not_look_like_a_process_crash() {
+        let script = Script::new("import json, sys, time\nsys.stderr.write('prompt \u{2014} English\\n')\nsys.stderr.flush()\nprint(json.dumps({'type':'final','text':'caf\u{00e9} \u{2014} done','seq':991,'rtf':0.1}, ensure_ascii=False), flush=True)\ntime.sleep(10)\n");
+        let side = script.spawn().await;
+        let text = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some((text, _)) = side.pop_transcript_for_seq(991).await.unwrap() { break text; }
+                assert!(side.is_alive(), "Unicode must not terminate the stdout reader");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(text, "caf\u{00e9} \u{2014} done");
+        assert!(side.is_alive());
+        let errors = side.stderr_tail.lock().await;
+        assert!(errors.iter().any(|line| line.contains("prompt \u{2014} English")));
     }
 
     #[tokio::test]

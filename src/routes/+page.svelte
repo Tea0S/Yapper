@@ -81,7 +81,7 @@
   }
 
   let showWhatsNew = $state(false);
-  const WHATS_NEW_VERSION = "1.3.1";
+  const WHATS_NEW_VERSION = "1.3.2";
 
   type MicLevel = { rms: number; peak: number };
   let micLevel = $state<MicLevel>({ rms: 0, peak: 0 });
@@ -322,15 +322,15 @@
 
 <section class="hero">
   {#if showWhatsNew}
-    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.1">
+    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.2">
       <div class="whats-new-head">
-        <h2 class="whats-new-title">What’s new in 1.3.1</h2>
+        <h2 class="whats-new-title">What’s new in 1.3.2</h2>
         <button type="button" class="btn mini" onclick={dismissWhatsNew}>Dismiss</button>
       </div>
       <ul class="whats-new-list">
-        <li>Fixed competing engine restarts after an inference crash</li>
-        <li>Failed startup no longer leaves the recording controls blocked</li>
-        <li>Clearer decoder errors and recovery status</li>
+        <li>Fixed Windows dictation failures caused by accented letters and punctuation</li>
+        <li>Reliable Unicode communication with the inference engine</li>
+        <li>Engine diagnostics remain available after unexpected characters</li>
       </ul>
     </div>
   {/if}
