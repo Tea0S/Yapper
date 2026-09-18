@@ -1202,8 +1202,8 @@ fn paste_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_audio_input_devices() -> Result<Vec<AudioInputDevice>, String> {
-    list_input_devices()
+async fn list_audio_input_devices() -> Result<Vec<AudioInputDevice>, String> {
+    tokio::task::spawn_blocking(list_input_devices).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

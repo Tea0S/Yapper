@@ -84,14 +84,16 @@
   let microphoneError = $state("");
   let microphoneSaving = $state(false);
   let microphoneRefreshing = $state(false);
+  let microphoneListLoaded = $state(false);
   let engineProgress = $state("");
-  const microphoneMissing = $derived(Boolean(inputDeviceId) && !micDevices.some(d => d.id === inputDeviceId));
+  const microphoneMissing = $derived(microphoneListLoaded && Boolean(inputDeviceId) && !micDevices.some(d => d.id === inputDeviceId));
 
   async function refreshMicrophones() {
     if (microphoneRefreshing) return;
     microphoneRefreshing = true;
     try {
       micDevices = await invoke<{ id: string; label: string }[]>("list_audio_input_devices");
+      microphoneListLoaded = true;
       microphoneError = "";
     } catch (e) { microphoneError = String(e); }
     finally { microphoneRefreshing = false; }
@@ -99,8 +101,7 @@
 
   onMount(() => {
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible") void refreshMicrophones();
-      if (restartingEngine) void invoke<{ message: string }>("engine_progress").then(p => engineProgress = p.message).catch(() => {});
+      if (restartingEngine && document.visibilityState === "visible") void invoke<{ message: string }>("engine_progress").then(p => engineProgress = p.message).catch(() => {});
     }, 2000);
     return () => clearInterval(timer);
   });
@@ -344,11 +345,7 @@
       (await invoke<string | null>("get_setting_cmd", { key: "mic_normalize_peak" })) ?? "0.88";
     micMaxGain =
       (await invoke<string | null>("get_setting_cmd", { key: "mic_max_gain" })) ?? "12";
-    try {
-      micDevices = await invoke<{ id: string; label: string }[]>("list_audio_input_devices");
-    } catch {
-      micDevices = [{ id: "", label: "System default" }];
-    }
+    await refreshMicrophones();
     lazyLoadWhisper =
       (await invoke<string | null>("get_setting_cmd", { key: "lazy_load_whisper" })) === "true";
     hudWidgetEnabled =
@@ -521,7 +518,6 @@
   }
 
   onMount(() => {
-    void load();
     void (async () => {
       try {
         appVersion = await getVersion();
@@ -613,8 +609,18 @@
     return () => window.clearInterval(poll);
   });
 
-  afterNavigate(({ to }) => {
-    if (to?.url.pathname === "/settings") void load();
+  afterNavigate(({ from, to }) => {
+    // Initial navigation loads once; in-page links must not rescan or overwrite unsaved choices.
+    if (to?.url.pathname === "/settings" && from?.url.pathname !== "/settings") void load();
+    if (to?.url.hash) {
+      const target = document.getElementById(to.url.hash.slice(1));
+      let details = target?.closest("details");
+      while (details) {
+        details.open = true;
+        details = details.parentElement?.closest("details") ?? null;
+      }
+      target?.scrollIntoView({ block: "start" });
+    }
   });
 
   async function refreshModelCacheDiagnostic() {
@@ -910,8 +916,8 @@
     </div>
   </div>
 
-  <div class="panel block" id="instance-role">
-    <h2>This installation</h2>
+  <details class="panel block advanced" id="instance-role">
+    <summary>Advanced installation options</summary>
     <p class="muted short">
       Say whether this PC is mainly for <strong>dictating here</strong> or for <strong>running models for other
       Yapper installs</strong> on your LAN or VPN. You can still use both; this only changes emphasis in the app.
@@ -930,7 +936,7 @@
         aria-pressed={instanceRole === "network_server"}
         onclick={() => setInstanceRole("network_server")}>Network processing server</button>
     </div>
-  </div>
+  </details>
 
   {#if instanceRole === "network_server"}
   <div class="panel block" id="processing-server">
@@ -1030,6 +1036,35 @@
 
   <div class="panel block" id="inference-host">
     <h2>Speech engine</h2>
+    <div class="panel">
+      <h3>Dictation speed</h3>
+      <p>Choose a Whisper starting point, then fine-tune below. Larger models use more memory and may improve accuracy.</p>
+      <div class="row" role="group" aria-label="Dictation speed">
+        <button class="btn" aria-pressed={selectedSpeed === "fast"} onclick={() => choosePreset("fast")}>Fast · base</button>
+        <button class="btn" aria-pressed={selectedSpeed === "balanced"} onclick={() => choosePreset("balanced")}>Balanced · small</button>
+        <button class="btn" aria-pressed={selectedSpeed === "accurate"} onclick={() => choosePreset("accurate")}>Accurate · medium</button>
+      </div>
+      <p class="field-hint">Selected: {selectedSpeed === "custom" ? "Custom settings" : selectedSpeed === "fast" ? "Fast" : selectedSpeed === "balanced" ? "Balanced" : "Accurate"}. Save &amp; restart to apply changes.</p>
+      {#if presetMessage}<p role="status">{presetMessage}</p>{/if}
+      {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
+      <p>Use a recent recording on Home to benchmark this setup before choosing a larger model.</p>
+      <h3>Engine readiness</h3>
+      <div class="row" role="group" aria-label="Engine readiness">
+        <button class="btn" aria-pressed={selectedReadiness === "ready"} onclick={() => chooseReadiness(true)}>Ready instantly</button>
+        <button class="btn" aria-pressed={selectedReadiness === "memory"} onclick={() => chooseReadiness(false)}>Save memory</button>
+      </div>
+      <p class="field-hint">Selected: {selectedReadiness === "custom" ? "Custom settings" : selectedReadiness === "ready" ? "Ready instantly" : "Save memory"}. Save &amp; restart to apply changes.</p>
+      <p class="field-hint">Ready instantly loads at engine start and stays loaded. Save memory loads on demand and unloads after five idle minutes.</p>
+    </div>
+    <label class="check">
+      <input type="checkbox" bind:checked={liveDictationExperimental} />
+      Show live preview while recording (experimental)
+    </label>
+    <p class="field-hint">Preview appears in the desktop widget. Your final text is transcribed when you stop. The first use may download a preview model.</p>
+    {#if liveDictationExperimental}<p class="field-hint">Live preview is selected; background phrase processing resumes when preview is off.</p>{/if}
+    <details class="advanced">
+      <summary>Advanced speech engine settings</summary>
+      <p class="field-hint">Models, processor, memory, recognition tuning and troubleshooting.</p>
     <div class="field">
       <label for="host">Where transcription runs</label>
       <select id="host" bind:value={inferenceHost}>
@@ -1047,30 +1082,10 @@
         <input id="tok" type="password" bind:value={remoteToken} autocomplete="off" />
       </div>
     {/if}
-    <div class="panel">
-      <h3>Dictation speed</h3>
-      <p>Choose a Whisper starting point, then fine-tune below. Larger models use more memory and may improve accuracy.</p>
-      <div class="row" role="group" aria-label="Dictation speed">
-        <button class="btn" aria-pressed={selectedSpeed === "fast"} onclick={() => choosePreset("fast")}>Fast · base</button>
-        <button class="btn" aria-pressed={selectedSpeed === "balanced"} onclick={() => choosePreset("balanced")}>Balanced · small</button>
-        <button class="btn" aria-pressed={selectedSpeed === "accurate"} onclick={() => choosePreset("accurate")}>Accurate · medium</button>
-      </div>
-      <p class="field-hint">Selected: {selectedSpeed === "custom" ? "Custom settings" : selectedSpeed === "fast" ? "Fast" : selectedSpeed === "balanced" ? "Balanced" : "Accurate"}. Save &amp; restart to apply changes.</p>
-      {#if presetMessage}<p role="status">{presetMessage}</p>{/if}
-      {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
-      <p>Use a recent recording on Home to benchmark this setup before choosing a larger model.</p>
       <label class="check"><input type="checkbox" bind:checked={backgroundDictation} disabled={liveDictationExperimental} />Process completed phrases while I speak</label>
       <p class="field-hint">Starts after eight seconds at a natural pause. You can record the next dictation while the previous one finishes. Live preview takes priority when enabled; this preference resumes when live preview is off.</p>
       <label class="check"><input type="checkbox" bind:checked={dictionaryHints} />Help Whisper recognize my dictionary words</label>
       <p class="field-hint">Uses up to 32 priority terms. Restart the engine after editing your dictionary to refresh recognition hints. Text corrections still apply immediately.</p>
-      <h3>Engine readiness</h3>
-      <div class="row" role="group" aria-label="Engine readiness">
-        <button class="btn" aria-pressed={selectedReadiness === "ready"} onclick={() => chooseReadiness(true)}>Ready instantly</button>
-        <button class="btn" aria-pressed={selectedReadiness === "memory"} onclick={() => chooseReadiness(false)}>Save memory</button>
-      </div>
-      <p class="field-hint">Selected: {selectedReadiness === "custom" ? "Custom settings" : selectedReadiness === "ready" ? "Ready instantly" : "Save memory"}. Save &amp; restart to apply changes.</p>
-      <p class="field-hint">Ready instantly loads at engine start and stays loaded. Save memory loads on demand and unloads after five idle minutes.</p>
-    </div>
     <div class="field">
       <label for="eng">Recognition engine</label>
       <select id="eng" bind:value={engine}>
@@ -1196,8 +1211,7 @@
     {/if}
 
     {#if engine === "whisper"}
-      <details>
-      <summary>Advanced recognition settings</summary>
+      <h3 class="settings-subh">Recognition tuning</h3>
       <p class="note">
         Applied when the engine starts — use <em>Save &amp; restart engine</em>. Higher values often mean slower runs.
       </p>
@@ -1370,21 +1384,9 @@
         Voice detection on file uploads (recommended)
       </label>
 
-      </details>
     {/if}
 
-      <h3 class="settings-subh">Experimental live dictation</h3>
-      <p class="note">
-        While you hold push-to-talk, Moonshine or Sherpa streams a live preview into the <strong>HUD widget</strong>.
-        On release, the paste uses your normal batch Whisper/Parakeet engine (same as live-off dictation) so the
-        final text does not inherit streaming stutter or doubled words. Dictionary / tone / corrections still apply
-        once on that commit.
-      </p>
-      <label class="check">
-        <input type="checkbox" bind:checked={liveDictationExperimental} />
-        Live preview while recording (experimental)
-      </label>
-      {#if liveDictationExperimental}<p role="status">Live preview is selected. Background phrase processing is paused to keep the engines from competing. Final text is transcribed when you stop.</p>{/if}
+      <h3 class="settings-subh">Live preview tuning</h3>
       <div class="field">
         <label for="liveEng">Live streaming engine</label>
         <select
@@ -1488,6 +1490,7 @@
         </details>
       {/if}
     </div>
+    </details>
     <button type="button" class="btn btn-primary" disabled={restartingEngine} onclick={restartEngine}>
       {restartingEngine ? "Applying settings…" : "Save & restart engine"}
     </button>
@@ -1496,8 +1499,8 @@
   </div>
 
   {#if !appIsMac}
-    <div class="panel block" id="gpu-deps">
-      <h2>NVIDIA GPU helpers</h2>
+    <details class="panel block advanced" id="gpu-deps">
+      <summary>Advanced NVIDIA GPU setup</summary>
       <p class="muted short">
         Needed for GPU-accelerated Whisper on Windows (large one-time download, ~800&nbsp;MB). Model files are separate.
         Linux uses your Python environment instead.
@@ -1516,27 +1519,23 @@
       {#if nvidiaInstallLog}
         <pre class="install-log">{nvidiaInstallLog}</pre>
       {/if}
-    </div>
+    </details>
   {/if}
 
   <div class="panel block">
     <h2 id="microphone">Microphone</h2>
-    <label class="check"><input type="checkbox" bind:checked={adaptiveMicrophone} />Automatically adapt speech detection to my microphone</label>
-    <p class="field-hint">Estimates background noise for each recording and preserves a short margin around speech. Turn off to use the manual noise gate below.</p>
-    <p class="muted short">Used for push-to-talk and dictation in the app. Sliders adjust sensitivity and volume shaping.</p>
     <div class="field">
       <label for="mic">Microphone</label>
       <select id="mic" bind:value={inputDeviceId}>
-        {#if microphoneMissing}<option value={inputDeviceId}>{inputDeviceId} (disconnected)</option>{/if}
+        {#if microphoneMissing}<option value={inputDeviceId}>{inputDeviceId} (not found)</option>{/if}
         {#each micDevices as d}
           <option value={d.id}>{d.label}</option>
         {/each}
       </select>
     </div>
-    {#if microphoneMissing}<p role="status">Your preferred microphone is disconnected. {microphoneFallback ? "The system default will be used until it returns." : "Reconnect it or choose a different microphone."}</p>{/if}
+    {#if microphoneMissing}<p role="status">Your preferred microphone was not found on the last check. {microphoneFallback ? "The system default will be used until it returns." : "Reconnect it or choose a different microphone."}</p>{/if}
     <button class="btn" disabled={microphoneRefreshing} onclick={refreshMicrophones}>{microphoneRefreshing ? "Checking microphones…" : "Refresh microphones"}</button>
-    <label class="check"><input type="checkbox" bind:checked={microphoneFallback} />Use the system default if my preferred microphone is unavailable</label>
-    <p class="field-hint">Your preferred microphone stays saved and is tried again at the next recording. A microphone change takes effect on your next recording.</p>
+    <p class="field-hint">Connected or disconnected a headset? Refresh this list. Yapper checks the selected device when you start recording.</p>
     {#if !appIsMac}<label class="check"><input type="checkbox" bind:checked={dictationSoundCues} />Play brief sounds for recording, processing, insertion and errors (Windows)</label>{/if}
     <h3>Speaking pace</h3>
     <div class="row" role="group" aria-label="Pause tolerance">
@@ -1545,6 +1544,13 @@
       <button class="btn" aria-pressed={vadMinSilenceMs === "3000"} onclick={() => vadMinSilenceMs = "3000"}>Extra time</button>
     </div>
     <p class="field-hint">Longer pauses keep more of your thought together before background processing begins. Recording continues until you stop it. Recognition may still add punctuation.</p>
+    <details class="advanced">
+      <summary>Advanced microphone settings</summary>
+    <label class="check"><input type="checkbox" bind:checked={microphoneFallback} />Use the system default if my preferred microphone is unavailable</label>
+    <p class="field-hint">Your preferred microphone stays saved and is tried again at the next recording. A microphone change takes effect on your next recording.</p>
+    <label class="check"><input type="checkbox" bind:checked={adaptiveMicrophone} />Automatically adapt speech detection to my microphone</label>
+    <p class="field-hint">Estimates background noise for each recording and preserves a short margin around speech. Turn off to use the manual noise gate below.</p>
+    <p class="muted short">Used for push-to-talk and dictation in the app. Sliders adjust sensitivity and volume shaping.</p>
     <div class="field">
       <label for="vad">Background noise gate</label>
       <div class="slider-row">
@@ -1612,6 +1618,7 @@
       </div>
       <p class="field-hint">Raise if transcripts are empty; lower if sound distorts.</p>
     </div>
+    </details>
     <button type="button" class="btn" disabled={microphoneSaving} onclick={saveMicrophoneOnly}>{microphoneSaving ? "Saving…" : "Save microphone settings"}</button>
     {#if microphoneMessage}<p role="status">{microphoneMessage}</p>{/if}
     {#if microphoneError}<p class="warn" role="alert">{microphoneError}</p>{/if}
@@ -1637,6 +1644,8 @@
         {/if}
       </p>
     </div>
+    <details class="advanced">
+      <summary>Advanced output settings</summary>
     <div class="field">
       <label for="grammar-restore">Grammar restore</label>
       <select id="grammar-restore" bind:value={grammarRestore}>
@@ -1650,6 +1659,7 @@
         First use downloads a small English model into the cache.
       </p>
     </div>
+    </details>
     <button type="button" class="btn" onclick={saveCore}>Save style</button>
   </div>
 
@@ -1673,7 +1683,7 @@
     <h2>Keyboard shortcuts</h2>
     <p class="muted short">
       Use <strong>Record shortcut</strong> and press the real keys (modifiers + one key). Esc cancels. You can still edit the
-      text field manually. When a shortcut is set, a readable label appears below (e.g. ⌘⇧ on macOS, Ctrl + Shift elsewhere).
+      shortcut text manually under Advanced shortcut settings. When a shortcut is set, a readable label appears below (e.g. ⌘⇧ on macOS, Ctrl + Shift elsewhere).
       Global shortcuts need the inference engine running for dictation.
     </p>
     {#if captureTarget}
@@ -1683,9 +1693,9 @@
       </p>
     {/if}
     <div class="field">
-      <label for="k1">Push to talk</label>
+      <span class="keybind-label">Push to talk</span>
       <div class="keybind-row">
-        <input id="k1" class="mono keybind-input" bind:value={kPtt} autocomplete="off" spellcheck="false" />
+
         <button
           type="button"
           class="btn keybind-record"
@@ -1704,9 +1714,9 @@
       {/if}
     </div>
     <div class="field">
-      <label for="k2">Toggle open mic</label>
+      <span class="keybind-label">Toggle open mic</span>
       <div class="keybind-row">
-        <input id="k2" class="mono keybind-input" bind:value={kMic} autocomplete="off" spellcheck="false" />
+
         <button
           type="button"
           class="btn keybind-record"
@@ -1726,9 +1736,9 @@
       {/if}
     </div>
     <div class="field">
-      <label for="k3">Stop dictation</label>
+      <span class="keybind-label">Stop dictation</span>
       <div class="keybind-row">
-        <input id="k3" class="mono keybind-input" bind:value={kStop} autocomplete="off" spellcheck="false" />
+
         <button
           type="button"
           class="btn keybind-record"
@@ -1749,6 +1759,19 @@
     {#if conflict.length}
       <p class="warn">Shortcut already used by: {conflict.join(", ")}</p>
     {/if}
+    <details class="advanced">
+      <summary>Advanced shortcut settings</summary>
+      <p class="field-hint">Edit shortcut strings manually. Use Record shortcut above for the simplest setup.</p>
+      <div class="field"><label for="k1">Push to talk</label>
+        <input id="k1" class="mono keybind-input" bind:value={kPtt} autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="field"><label for="k2">Toggle open mic</label>
+        <input id="k2" class="mono keybind-input" bind:value={kMic} autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="field"><label for="k3">Stop dictation</label>
+        <input id="k3" class="mono keybind-input" bind:value={kStop} autocomplete="off" spellcheck="false" />
+      </div>
+    </details>
     <button type="button" class="btn btn-primary" onclick={saveKeybinds}>
       Save keybinds
     </button>
@@ -1756,6 +1779,12 @@
 </section>
 
 <style>
+  .advanced { margin: 1rem 0; border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem 1rem; }
+  .advanced > summary { cursor: pointer; font-weight: 600; color: var(--text); }
+  .advanced[open] > summary { margin-bottom: 1rem; }
+  .advanced > summary::marker { color: var(--accent); }
+  .keybind-label { font-weight: 600; }
+
   h1 {
     margin-top: 0;
   }
