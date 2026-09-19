@@ -972,10 +972,7 @@
 
   <details class="panel block advanced" id="instance-role">
     <summary>Advanced installation options</summary>
-    <p class="muted short">
-      Say whether this PC is mainly for <strong>dictating here</strong> or for <strong>running models for other
-      Yapper installs</strong> on your LAN or VPN. You can still use both; this only changes emphasis in the app.
-    </p>
+    <p class="muted short">Use this computer for dictation, or share its speech engine with your other devices.</p>
     <div class="theme-toggle" role="group" aria-label="Primary use of this PC">
       <button
         type="button"
@@ -995,12 +992,7 @@
   {#if instanceRole === "network_server"}
   <div class="panel block" id="processing-server">
     <h2>Network processing server (Yapper Node)</h2>
-    <p class="muted short">
-      Turn this PC into a WebSocket server other Yapper installs can connect to (Settings → Speech engine → “Another
-      computer”). Uses the same Python stack as the local sidecar: run
-      <code>pip install -r yapper-node/requirements.txt</code>
-      once. Prefer Tailscale or another VPN; do not expose the port to the public internet without TLS and auth you trust.
-    </p>
+    <p class="muted short">Share transcription with your other devices over a local network or VPN. Install server requirements with <code>pip install -r yapper-node/requirements.txt</code>. Don’t expose the server directly to the internet.</p>
     {#if nodeStatus && !nodeStatus.scriptFound}
       <p class="warn" role="alert">
         Yapper Node script was not found at the expected path. Use a full repo checkout, or set the
@@ -1092,7 +1084,7 @@
     <h2>Speech engine</h2>
     <div class="panel">
       <h3>Dictation speed</h3>
-      <p>Choose a Whisper starting point, then fine-tune below. Larger models use more memory and may improve accuracy.</p>
+      <p>Larger models may improve accuracy but use more memory.</p>
       <div class="row" role="group" aria-label="Dictation speed">
         <button class="btn" aria-pressed={selectedSpeed === "fast"} onclick={() => choosePreset("fast")}>Fast · base</button>
         <button class="btn" aria-pressed={selectedSpeed === "balanced"} onclick={() => choosePreset("balanced")}>Balanced · small</button>
@@ -1102,19 +1094,19 @@
       {#if presetMessage}<p role="status">{presetMessage}</p>{/if}
       {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
       <p>Use a recent recording on Home to benchmark this setup before choosing a larger model.</p>
-      <h3>Engine readiness</h3>
+      <h3>When to load the model</h3>
       <div class="row" role="group" aria-label="Engine readiness">
         <button class="btn" aria-pressed={selectedReadiness === "ready"} onclick={() => chooseReadiness(true)}>Ready instantly</button>
         <button class="btn" aria-pressed={selectedReadiness === "memory"} onclick={() => chooseReadiness(false)}>Save memory</button>
       </div>
       <p class="field-hint">Selected: {selectedReadiness === "custom" ? "Custom settings" : selectedReadiness === "ready" ? "Ready instantly" : "Save memory"}. Save &amp; restart to apply changes.</p>
-      <p class="field-hint">Ready instantly loads at engine start and stays loaded. Save memory loads on demand and unloads after five idle minutes.</p>
+      <p class="field-hint">Keep the model ready, or unload it after five idle minutes to save memory.</p>
     </div>
     <label class="check">
       <input type="checkbox" bind:checked={liveDictationExperimental} />
       Show live preview while recording (experimental)
     </label>
-    <p class="field-hint">Preview appears in the desktop widget. Your final text is transcribed when you stop. The first use may download a preview model.</p>
+    <p class="field-hint">See words in the widget as you speak. Final text appears when you stop. First use may download a model.</p>
     {#if liveDictationExperimental}<p class="field-hint">Live preview is selected; background phrase processing resumes when preview is off.</p>{/if}
     <details class="advanced">
       <summary>Advanced speech engine settings</summary>
@@ -1137,11 +1129,11 @@
       </div>
     {/if}
       <label class="check"><input type="checkbox" bind:checked={backgroundDictation} disabled={liveDictationExperimental} />Process completed phrases while I speak</label>
-      <p class="field-hint">Starts after eight seconds at a natural pause. You can record the next dictation while the previous one finishes. Live preview takes priority when enabled; this preference resumes when live preview is off.</p>
+      <p class="field-hint">Process phrases during pauses to reduce the wait after recording. Live preview takes priority when enabled.</p>
       <label class="check"><input type="checkbox" bind:checked={dictionaryHints} />Help Whisper recognize my dictionary words</label>
-      <p class="field-hint">Uses up to 32 priority terms. Restart the engine after editing your dictionary to refresh recognition hints. Text corrections still apply immediately.</p>
+      <p class="field-hint">Helps recognize words in your dictionary. Restart the engine after adding words.</p>
     <div class="field">
-      <label for="eng">Recognition engine</label>
+      <label for="eng">Speech engine</label>
       <select id="eng" bind:value={engine}>
         <option value="whisper">Whisper (recommended)</option>
         {#if !appIsMac}
@@ -1152,9 +1144,7 @@
       </select>
     </div>
     {#if engine === "parakeet"}
-      <p class="note">
-        Parakeet runs via sherpa-onnx with built-in punctuation. CUDA is recommended on Windows/Linux; CPU works too.
-      </p>
+      <p class="note">Includes punctuation and works on CPU or NVIDIA GPU.</p>
     {/if}
     <div class="field">
       {#if engine === "whisper"}
@@ -1166,15 +1156,7 @@
             </option>
           {/each}
         </select>
-        <p class="field-hint">
-          {#if appleSilicon}
-            MLX checkpoints for Apple Silicon (Metal). One-time download into the app cache; first run may fetch from
-            Hugging Face.
-          {:else}
-            One-time download into the app cache. Size is the same for int8, float16, and float32 — only speed and memory
-            while running change.
-          {/if}
-        </p>
+        <p class="field-hint">First use downloads the model. Its size affects download time and memory use.</p>
       {:else}
         <label for="wm-pk">Model</label>
         <select id="wm-pk" bind:value={parakeetModel}>
@@ -1184,22 +1166,11 @@
             </option>
           {/each}
         </select>
-        <p class="field-hint">
-          sherpa-onnx INT8 checkpoints; first load downloads from GitHub (~670 MB). Works on CPU or GPU.
-        </p>
+        <p class="field-hint">First use downloads about 670 MB. Works on CPU or GPU.</p>
       {/if}
     </div>
     {#if engine === "whisper"}
-      <p class="note">
-        {#if appleSilicon && lazyLoadWhisper}
-          Load-on-demand: weights download and load on your first dictation. Turn off &ldquo;Load the model only when
-          needed&rdquo; to download at engine start instead.
-        {:else if appleSilicon}
-          Weights load when the engine starts (Hugging Face download first if needed). Wi‑Fi helps for larger models.
-        {:else}
-          First use downloads the model; Wi‑Fi helps for larger sizes.
-        {/if}
-      </p>
+      <p class="note">With load-on-demand, the first recording downloads and loads the model.</p>
     {:else}
       <p class="note">First use downloads the checkpoint; Wi‑Fi helps for the larger options.</p>
     {/if}
@@ -1218,7 +1189,7 @@
         <option value="60">After 60 minutes</option>
       </select>
     </div>
-    <p class="note">After idle timeout, the model unloads from RAM. The next session loads from disk again (no new download).</p>
+    <p class="note">Frees memory while idle. The next recording reloads the model without downloading it again.</p>
     {#if engine === "whisper" && !appleSilicon}
       <div class="field">
         <label for="ct">Number format (speed vs. precision)</label>
@@ -1227,20 +1198,10 @@
           <option value="float16">float16 — middle ground</option>
           <option value="float32">float32 — largest memory, highest precision</option>
         </select>
-        <p class="field-hint">
-          Rough memory while loaded (model + format): {formatStorageMb(
-            whisperRuntimeMbHint(whisperModel, computeType),
-          )} — ballpark only; real use depends on GPU drivers and batching.
-        </p>
+        <p class="field-hint">Estimated memory: {formatStorageMb(whisperRuntimeMbHint(whisperModel, computeType))}. Actual use varies.</p>
       </div>
     {:else if engine === "whisper" && appleSilicon}
-      <p class="field-hint">
-        Rough memory while loaded (ballpark): {formatStorageMb(
-          whisperRuntimeMbHint(whisperModel, computeType),
-        )} — MLX runs Whisper in <strong>fp16 on Metal</strong>. This is not int8: the
-        <code>compute_type</code> value in your settings (<code>{computeType}</code>) is only for faster-whisper /
-        CTranslate2 and is ignored for MLX.
-      </p>
+      <p class="field-hint">Estimated memory: {formatStorageMb(whisperRuntimeMbHint(whisperModel, computeType))}. Apple Silicon uses Metal acceleration.</p>
     {/if}
     <div class="field">
       <label for="wd">Processor</label>
@@ -1266,9 +1227,7 @@
 
     {#if engine === "whisper"}
       <h3 class="settings-subh">Recognition tuning</h3>
-      <p class="note">
-        Applied when the engine starts — use <em>Save &amp; restart engine</em>. Higher values often mean slower runs.
-      </p>
+      <p class="note">Use Save &amp; restart to apply changes. Higher values can slow transcription.</p>
       <div class="whisper-grid">
         {#if !appleSilicon}
           <div class="field">
@@ -1406,10 +1365,7 @@
           <option value="ja">Japanese</option>
           <option value="zh">Chinese</option>
         </select>
-        <p class="field-hint">
-          Prefer a fixed language for dictation (e.g. English). Auto-detect on short clips can
-          flip style and drop punctuation.
-        </p>
+        <p class="field-hint">Choose your spoken language for more consistent results on short recordings.</p>
       </div>
       <div class="field">
         <label for="wprompt">Vocabulary hint (optional)</label>
@@ -1419,19 +1375,15 @@
           bind:value={whisperInitialPrompt}
           placeholder={'e.g. Names: Kane, Vivian. Terms: "myocardial infarction".'}
         ></textarea>
-        <p class="field-hint">
-          Whisper copies this text’s style. Include capitals and sentence punctuation (periods),
-          or punctuation may vanish for the whole run. Bare word lists are the usual cause.
-        </p>
+        <p class="field-hint">Add names or specialist terms. Use normal capitalization and punctuation.</p>
       </div>
       <label class="check">
         <input type="checkbox" bind:checked={whisperConditionOnPrevious} />
-        Use earlier text for context (smoother paragraphs; mistakes can carry forward)
+        Use earlier text for context (may repeat mistakes)
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={whisperVadFilterPcm} />
-        Extra Silero voice detection on live mic (off by default — Rust noise gate already runs;
-        turn on only if you need stricter silence stripping)
+        Extra silence filtering (may miss quiet speech)
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={whisperVadFilterFile} />
@@ -1503,9 +1455,7 @@
       Demo mode — fake text only, no real transcription
     </label>
     <div class="field diag-block">
-      <p class="muted short">
-        If downloads or the model seem stuck, check where files are stored and what the app thinks is configured.
-      </p>
+      <p class="muted short">Check model files and configuration when downloads or loading fail.</p>
       <button type="button" class="btn" onclick={refreshModelCacheDiagnostic}>
         Check model folder &amp; status
       </button>
@@ -1555,10 +1505,7 @@
   {#if !appIsMac}
     <details class="panel block advanced" id="gpu-deps">
       <summary>Advanced NVIDIA GPU setup</summary>
-      <p class="muted short">
-        Needed for GPU-accelerated Whisper on Windows (large one-time download, ~800&nbsp;MB). Model files are separate.
-        Linux uses your Python environment instead.
-      </p>
+      <p class="muted short">Required for NVIDIA acceleration on Windows. Downloads about 800 MB, separate from speech models.</p>
       {#if gpuError}
         <p class="warn" role="alert">Could not check NVIDIA GPU: {gpuError}</p>
       {:else if cuda === null}
@@ -1593,7 +1540,7 @@
     </div>
     {#if microphoneMissing}<p role="status">Your preferred microphone was not found on the last check. {microphoneFallback ? "The system default will be used until it returns." : "Reconnect it or choose a different microphone."}</p>{/if}
     <button class="btn" disabled={microphoneRefreshing} onclick={refreshMicrophones}>{microphoneRefreshing ? "Checking microphones…" : "Refresh microphones"}</button>
-    <p class="field-hint">Connected or disconnected a headset? Refresh this list. Yapper checks the selected device when you start recording.</p>
+    <p class="field-hint">Changed microphones? Select Refresh. Your choice applies to the next recording.</p>
     {#if !appIsMac}<label class="check"><input type="checkbox" bind:checked={dictationSoundCues} />Play brief sounds for recording, processing, insertion and errors (Windows)</label>{/if}
     <h3>Speaking pace</h3>
     <div class="row" role="group" aria-label="Pause tolerance">
@@ -1601,14 +1548,14 @@
       <button class="btn" aria-pressed={vadMinSilenceMs === "1500"} onclick={() => vadMinSilenceMs = "1500"}>Longer pauses</button>
       <button class="btn" aria-pressed={vadMinSilenceMs === "3000"} onclick={() => vadMinSilenceMs = "3000"}>Extra time</button>
     </div>
-    <p class="field-hint">Longer pauses keep more of your thought together before background processing begins. Recording continues until you stop it. Recognition may still add punctuation.</p>
+    <p class="field-hint">Allow longer pauses before processing a phrase. Recording continues until you stop it.</p>
     <details class="advanced">
       <summary>Advanced microphone settings</summary>
     <label class="check"><input type="checkbox" bind:checked={microphoneFallback} />Use the system default if my preferred microphone is unavailable</label>
-    <p class="field-hint">Your preferred microphone stays saved and is tried again at the next recording. A microphone change takes effect on your next recording.</p>
+    <p class="field-hint">Your preferred microphone stays saved and is checked at the next recording.</p>
     <label class="check"><input type="checkbox" bind:checked={adaptiveMicrophone} />Automatically adapt speech detection to my microphone</label>
-    <p class="field-hint">Estimates background noise for each recording and preserves a short margin around speech. Turn off to use the manual noise gate below.</p>
-    <p class="muted short">Used for push-to-talk and dictation in the app. Sliders adjust sensitivity and volume shaping.</p>
+    <p class="field-hint">Adjusts to background noise automatically. Turn off to set sensitivity manually.</p>
+    <p class="muted short">Adjust microphone sensitivity and volume.</p>
     <div class="field">
       <label for="vad">Background noise gate</label>
       <div class="slider-row">
@@ -1639,10 +1586,7 @@
         />
         <input class="slider-value" type="text" bind:value={vadMinSilenceMs} inputmode="numeric" autocomplete="off" />
       </div>
-      <p class="field-hint">
-        How long a pause can be before speech is split. Raise this if mid-thought pauses start new
-        sentences; lower if long holds feel sluggish to process.
-      </p>
+      <p class="field-hint">Wait this long before splitting speech into phrases. This does not stop recording.</p>
     </div>
     <div class="field">
       <label for="peak">Recording loudness target</label>
@@ -1683,7 +1627,7 @@
   </div>
 
   <div class="panel block">
-    <h2>Written output style</h2>
+    <h2>Writing style</h2>
     <p class="muted short">How punctuation and cleanup are applied after transcription.</p>
     <div class="field">
       <label for="tone">Style</label>
@@ -1694,28 +1638,24 @@
       </select>
       <p class="field-hint">
         {#if tonePreset === "minimal"}
-          Calm output: turns excitement marks into periods and softens dashes.
+          Replaces exclamation marks with periods and softens dashes.
         {:else if tonePreset === "expressive"}
-          Keeps energy (! ? …) and normalizes em-dash / ellipsis spacing.
+          Keeps expressive punctuation.
         {:else}
-          Light cleanup only — leaves Whisper’s punctuation mostly as-is.
+          Light cleanup; keeps most original punctuation.
         {/if}
       </p>
     </div>
     <details class="advanced">
-      <summary>Advanced output settings</summary>
+      <summary>Advanced writing settings</summary>
     <div class="field">
-      <label for="grammar-restore">Grammar restore</label>
+      <label for="grammar-restore">Punctuation and capitals</label>
       <select id="grammar-restore" bind:value={grammarRestore}>
         <option value="off">Off</option>
         <option value="auto">Auto (when punctuation is missing)</option>
         <option value="always">Always</option>
       </select>
-      <p class="field-hint">
-        Optional sherpa-onnx pass that restores periods, commas, questions, and capitalization when
-        Whisper drops into no-punct mode. Spoken commands (period, comma, …) still run first.
-        First use downloads a small English model into the cache.
-      </p>
+      <p class="field-hint">Adds punctuation and capitals. Auto runs only when punctuation is missing. First use downloads an English model.</p>
     </div>
     </details>
     <button type="button" class="btn" onclick={saveOutputStyle}>Save style</button>
@@ -1725,10 +1665,7 @@
 
   <div class="panel block">
     <h2>Desktop widget</h2>
-    <p class="muted short">
-      Small on-screen bar for dictation shortcuts when the inference engine is on. Turning it off does not stop the engine
-      or global hotkeys.
-    </p>
+    <p class="muted short">Show recording status above other apps. Hiding the widget leaves dictation shortcuts active.</p>
     <label class="check">
       <input
         type="checkbox"
@@ -1744,17 +1681,13 @@
         <option value="controls">Speak/Stop controls</option>
       </select>
     </label>
-    <p class="muted short">Classic keeps the original compact bar and audio dots. Controls adds visible recording buttons.</p>
+    <p class="muted short">Classic shows audio levels. Controls adds Speak and Stop buttons.</p>
     {#if settingsError}<p class="warn" role="alert">{settingsError}</p>{/if}
   </div>
 
   <div class="panel block">
     <h2>Keyboard shortcuts</h2>
-    <p class="muted short">
-      Use <strong>Record shortcut</strong> and press the real keys (modifiers + one key). Esc cancels. You can still edit the
-      shortcut text manually under Advanced shortcut settings. When a shortcut is set, a readable label appears below (e.g. ⌘⇧ on macOS, Ctrl + Shift elsewhere).
-      Global shortcuts need the inference engine running for dictation.
-    </p>
+    <p class="muted short">Select <strong>Record shortcut</strong>, then press your key combination. Press Esc to cancel. Start the engine to use shortcuts.</p>
     {#if captureTarget}
       <p class="capture-hint" role="status">
         Listening for <strong>{captureTarget.replaceAll("_", " ")}</strong> — press a combination, or

@@ -109,7 +109,7 @@
   }
 
   let showWhatsNew = $state(false);
-  const WHATS_NEW_VERSION = "1.3.8";
+  const WHATS_NEW_VERSION = "1.3.10";
 
   type MicLevel = { rms: number; peak: number };
   let micLevel = $state<MicLevel>({ rms: 0, peak: 0 });
@@ -194,7 +194,7 @@
       // second engine from this notification while the watchdog is loading one.
       starting = true;
       lastError = null;
-      engine = { ready: false, mode: "local", message: "Restarting inference engine…" };
+      engine = { ready: false, mode: "local", message: "Restarting…" };
     }).then((u) => unsubs.push(u));
     void listen<{ message?: string }>("engine-recovered", async (ev) => {
       starting = false;
@@ -359,17 +359,14 @@
 
 <section class="hero">
   {#if showWhatsNew}
-    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.8">
+    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.10">
       <div class="whats-new-head">
-        <h2 class="whats-new-title">What’s new in 1.3.8</h2>
+        <h2 class="whats-new-title">What’s new in 1.3.10</h2>
         <button type="button" class="btn mini" onclick={dismissWhatsNew}>Dismiss</button>
       </div>
       <ul class="whats-new-list">
-        <li>Restored native transparent rendering for the pill and removed custom window clipping</li>
-        <li>Classic pill restored by default, with Speak/Stop controls as an optional widget style</li>
-        <li>Saved settings and shortcuts load before editing; save failures are shown clearly</li>
-        <li>Microphone discovery and GPU checks run independently of settings loading</li>
-        <li>Automatic paste supports fields without Windows accessibility element IDs</li>
+        <li>More reliable paste detection when an app redraws its text field</li>
+        <li>Shorter labels, clearer instructions, and less clutter</li>
       </ul>
     </div>
   {/if}
@@ -378,8 +375,7 @@
     <div class="panel server-spotlight" role="region" aria-label="Processing server">
       <h2 class="server-spotlight-title">This PC is your processing server</h2>
       <p class="muted server-spotlight-lede">
-        Start the WebSocket bridge here so other Yapper installs can send audio for transcription. Full controls live in
-        Settings.
+        Let your other devices use this computer for transcription. Configure access in Settings.
       </p>
       {#if nodeQuick}
         <p class="server-spotlight-status">
@@ -403,11 +399,7 @@
   {/if}
 
   <h1>Speak locally. Stay in control.</h1>
-  <p class="lede">
-    Yapper runs Whisper-class models on your machine or a <strong>self-hosted</strong> node on
-    your LAN/VPN. Dictionary, corrections, and tone presets apply on this device after
-    transcription.
-  </p>
+  <p class="lede">Dictate into your apps using speech recognition on this computer or a computer you connect to.</p>
   <div class="actions">
     {#if engine?.ready}
       <button
@@ -416,7 +408,7 @@
         disabled={stopping || starting || testRecording || testTranscribing}
         onclick={stopEngine}
       >
-        {stopping ? "Stopping engine…" : "Stop inference engine"}
+        {stopping ? "Stopping engine…" : "Stop dictation engine"}
       </button>
     {:else}
       <button
@@ -425,7 +417,7 @@
         disabled={starting || stopping}
         onclick={startEngine}
       >
-        {starting ? "Starting engine…" : "Start inference engine"}
+        {starting ? "Getting ready…" : "Start dictation"}
       </button>
     {/if}
     <a class="btn" href="/settings">Open settings</a>
@@ -438,9 +430,9 @@
   <!-- Screen reader + live updates when status changes -->
   <div class="sr-only" aria-live="polite" aria-atomic="true">
     {#if starting}
-      Starting inference engine, please wait.
+      Getting dictation ready.
     {:else if stopping}
-      Stopping inference engine, please wait.
+      Stopping dictation.
     {:else if engine?.ready}
       Engine ready, {engine.mode} mode.
     {:else if lastError}
@@ -504,9 +496,9 @@
         {#if job.text}<p style="white-space: pre-wrap; overflow-wrap: anywhere">{job.text}</p>{/if}
         <div class="actions">
           <button class="btn" disabled={!job.text} onclick={() => copyJob(job.text)}>Copy</button>
-          <button class="btn" disabled={jobAction !== null || job.status === "queued" || job.status === "processing" || !engine?.ready} onclick={() => jobCommand(job.id, "retry_dictation")}>Retry recording</button>
-          <button class="btn" disabled={jobAction !== null || job.status === "queued" || job.status === "processing" || !engine?.ready} onclick={() => jobCommand(job.id, "benchmark_dictation")}>Benchmark this recording</button>
-          <button class="btn" disabled={!job.text} onclick={() => { correctionJob = job.id; correctionFrom = ""; correctionTo = ""; }}>Teach a correction</button>
+          <button class="btn" disabled={jobAction !== null || job.status === "queued" || job.status === "processing" || !engine?.ready} onclick={() => jobCommand(job.id, "retry_dictation")}>Try again</button>
+          <button class="btn" disabled={jobAction !== null || job.status === "queued" || job.status === "processing" || !engine?.ready} onclick={() => jobCommand(job.id, "benchmark_dictation")}>Compare speed</button>
+          <button class="btn" disabled={!job.text} onclick={() => { correctionJob = job.id; correctionFrom = ""; correctionTo = ""; }}>Correct a word</button>
           <button class="btn" disabled={jobAction !== null || job.status === "queued" || job.status === "processing"} onclick={() => jobCommand(job.id, "discard_dictation")}>Discard</button>
         </div>
         {#if job.app_key}
@@ -536,11 +528,7 @@
     {#if microphoneNotice}<p role="status">{microphoneNotice}</p>{/if}
     {#if microphoneError}<p class="warn" role="alert">{microphoneError} <a href="/settings#microphone">Microphone settings</a></p>{/if}
     {#if (testRecording || testTranscribing) && engineProgress}<p role="status">{engineProgress}</p>{/if}
-    <ol class="setup-steps">
-      <li>Choose your microphone in <a href="/settings#microphone">Microphone settings</a>.</li>
-      <li>Start the engine, then select <strong>Start recording</strong>. Say a full sentence at your own pace.</li>
-      <li>Select <strong>Stop and transcribe</strong>, then check the words below. Nothing is pasted into another app.</li>
-    </ol>
+    <p>Record a sentence, then check the text below. This test won’t paste into another app.</p>
     {#if !engine?.ready}<p class="muted">Start the engine above to try dictation.</p>{/if}
     <div
       class="input-meter"
@@ -576,7 +564,7 @@
     >
       {testStarting ? "Opening microphone…" : testTranscribing ? "Transcribing…" : testRecording ? "Stop and transcribe" : "Start recording"}
     </button>
-    <p role="status">{testRecording ? "Recording. Take your time; select Stop and transcribe when finished." : testTranscribing ? "Preparing your transcript. The first recording can take longer while the model loads." : testNotice}</p>
+    <p role="status">{testRecording ? "Recording… Stop when you’re finished." : testTranscribing ? "Transcribing… The first recording may take longer." : testNotice}</p>
     {#if testError}
       <p class="warn" role="alert">{testError}</p>
     {/if}
@@ -588,10 +576,7 @@
   <ul class="tips">
     <li>Hold <kbd>Push-to-talk</kbd> (see Settings) to dictate; text is pasted on release.</li>
     <li>Prefer not to hold a key? Set a toggle recording shortcut in <a href="/settings">Settings</a>.</li>
-    <li>
-      Choosing a Whisper size for the first time can <strong>download</strong> model weights (see Settings). Stopping
-      the engine exits the sidecar and frees GPU memory; optional idle unload is in Settings too.
-    </li>
+    <li>First use downloads a speech model. Stop the engine to free memory.</li>
 
   </ul>
 </section>
@@ -802,10 +787,6 @@
   .test-title {
     margin: 0 0 0.5rem;
     font-size: 1.05rem;
-  }
-  .setup-steps {
-    margin: 0 0 1rem;
-    font-size: 0.9rem;
   }
   .input-meter {
     margin-bottom: 1rem;

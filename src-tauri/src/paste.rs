@@ -7,11 +7,34 @@ pub struct PasteTarget {
     pub window: isize,
     pub control: isize,
     pub app_key: String,
-    pub element: Option<Vec<i32>>,
+    pub element: Option<FocusedField>,
+}
+
+#[derive(Clone)]
+pub struct FocusedField {
+    runtime_id: Vec<i32>,
+    automation_id: String,
+    class_name: String,
+    control_type: i32,
+    bounds: [i32; 4],
+}
+
+impl FocusedField {
+    fn same_field(&self, other: &Self) -> bool {
+        if !self.runtime_id.is_empty() && self.runtime_id == other.runtime_id { return true; }
+        // Electron can recreate the accessibility object while the input stays put.
+        // Do not compare its text/name: those change as the user types.
+        self.control_type == other.control_type
+            && self.automation_id == other.automation_id
+            && self.class_name == other.class_name
+            && (!self.class_name.is_empty() || !self.automation_id.is_empty())
+            && self.bounds[2] > self.bounds[0] && self.bounds[3] > self.bounds[1]
+            && self.bounds == other.bounds
+    }
 }
 
 #[cfg(windows)]
-fn focused_element_id() -> Option<Vec<i32>> {
+fn focused_element_id() -> Option<FocusedField> {
     use windows::Win32::{System::{Com::*, Ole::*}, UI::Accessibility::*};
     use windows::core::Interface;
     unsafe {
@@ -23,6 +46,14 @@ fn focused_element_id() -> Option<Vec<i32>> {
                 let _ = timed.SetTransactionTimeout(300);
             }
             let element = automation.GetFocusedElement().ok()?;
+            let rect = element.CurrentBoundingRectangle().ok()?;
+            let identity = FocusedField {
+                runtime_id: Vec::new(),
+                automation_id: element.CurrentAutomationId().ok()?.to_string(),
+                class_name: element.CurrentClassName().ok()?.to_string(),
+                control_type: element.CurrentControlType().ok()?.0,
+                bounds: [rect.left, rect.top, rect.right, rect.bottom],
+            };
             let array = element.GetRuntimeId().ok()?;
             if array.is_null() { return None; }
             let result = (|| {
@@ -38,7 +69,7 @@ fn focused_element_id() -> Option<Vec<i32>> {
                 Some(ids)
             })();
             let _ = SafeArrayDestroy(array);
-            result
+            result.map(|runtime_id| FocusedField { runtime_id, ..identity })
         })();
         if initialized { CoUninitialize(); }
         result
@@ -77,10 +108,10 @@ pub fn paste_to_target(app: &tauri::AppHandle, target: PasteTarget, text: String
     let (tx, rx) = mpsc::channel();
     app.run_on_main_thread(move || {
         let result = (|| {
-            let current = capture_target().ok_or("Destination is unavailable. Copy the transcript from Home.")?;
+            let current = capture_target().ok_or("Could not find the text field.")?;
             if current.window != target.window || current.control != target.control || current.app_key != target.app_key
-                || matches!((&target.element, &current.element), (Some(expected), Some(actual)) if expected != actual) {
-                return Err("Destination changed. Copy the transcript from Home.".to_string());
+                || matches!((&target.element, &current.element), (Some(expected), Some(actual)) if !expected.same_field(actual)) {
+                return Err("The active text field changed.".to_string());
             }
             if multiline && !text_has_spoken_key_sentinels(&text) {
                 let mut cb = Clipboard::new().map_err(|e| e.to_string())?;
@@ -92,6 +123,19 @@ pub fn paste_to_target(app: &tauri::AppHandle, target: PasteTarget, text: String
         let _ = tx.send(result);
     }).map_err(|e| e.to_string())?;
     rx.recv().map_err(|e| e.to_string())?
+}
+
+/// Copy completed dictation without typing into an application.
+pub fn copy_dictation(text: &str) -> Result<(), String> {
+    // Spoken editing commands are internal key markers, not clipboard characters.
+    let plain: String = text.chars().filter_map(|c| match c {
+        '\u{E090}' => Some('\n'),
+        '\u{E092}' => Some('\t'),
+        '\u{E091}' | '\u{E093}' | '\u{E094}' => None,
+        _ => Some(c),
+    }).collect();
+    Clipboard::new().map_err(|e| e.to_string())?
+        .set_text(plain).map_err(|e| e.to_string())
 }
 
 fn text_has_spoken_key_sentinels(s: &str) -> bool {
@@ -271,4 +315,31 @@ pub async fn undo_n_times_at_focus_spawn(app: &tauri::AppHandle, n: u32) -> Resu
     tokio::task::spawn_blocking(move || undo_n_times_at_focus_on_main_thread(&app, n))
         .await
         .map_err(|e| format!("undo spawn_blocking: {e}"))?
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+    fn field() -> FocusedField {
+        FocusedField { runtime_id: vec![1], automation_id: "message".into(),
+            class_name: "editable".into(), control_type: 50004, bounds: [10, 20, 300, 80] }
+    }
+    #[test]
+    fn recreated_field_is_still_the_destination() {
+        let a = field(); let mut b = field(); b.runtime_id = vec![2];
+        assert!(a.same_field(&b));
+    }
+    #[test]
+    fn different_field_is_not_the_destination() {
+        let a = field(); let mut b = field(); b.runtime_id = vec![2];
+        b.automation_id = "search".into(); assert!(!a.same_field(&b));
+        b.automation_id = a.automation_id.clone(); b.bounds = [10, 100, 300, 160];
+        assert!(!a.same_field(&b));
+    }
+    #[test]
+    fn anonymous_objects_need_a_stable_runtime_id() {
+        let mut a = field(); a.automation_id.clear(); a.class_name.clear();
+        let mut b = a.clone(); b.runtime_id = vec![2]; assert!(!a.same_field(&b));
+        b.runtime_id = a.runtime_id.clone(); assert!(a.same_field(&b));
+    }
 }

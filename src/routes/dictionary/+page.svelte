@@ -142,7 +142,7 @@
     </select>
   </label>
 </div>
-<p class="muted io-hint">Export includes dictionary and corrections so you can take the same setup to another machine.</p>
+<p class="muted io-hint">Export your dictionary and corrections to use on another computer.</p>
 {#if dictIoMsg}
   <p class="io-ok">{dictIoMsg}</p>
 {/if}
@@ -153,7 +153,7 @@
 <section class="grid">
   <div>
     <h1>Dictionary</h1>
-    <p class="muted">Word or phrase boosts (word-boundary aware for <code>word</code> scope).</p>
+    <p class="muted">Add names, specialist terms, and preferred spellings.</p>
     <div class="panel">
       <div class="field">
         <label for="t">Term</label>
@@ -173,7 +173,7 @@
       <div class="field">
         <label for="dp">Priority</label>
         <input id="dp" bind:value={dPriority} inputmode="numeric" autocomplete="off" />
-        <p class="field-hint">Higher runs first when several entries match (default 10).</p>
+        <p class="field-hint">Higher numbers take priority when entries overlap.</p>
       </div>
       <button type="button" class="btn btn-primary" onclick={addDict}>Add / update</button>
       <ul class="list">
@@ -193,20 +193,20 @@
 
   <div>
     <h1>Corrections</h1>
-    <p class="muted">Simple mishear → intended replacements (applied before dictionary).</p>
+    <p class="muted">Replace words Yapper often mishears.</p>
     <div class="panel">
       <div class="field">
-        <label for="mf">Mishear</label>
-        <input id="mf" bind:value={cFrom} placeholder="wrapper flow" />
+        <label for="mf">Heard</label>
+        <input id="mf" bind:value={cFrom} placeholder="yapper app" />
       </div>
       <div class="field">
-        <label for="int">Intended</label>
-        <input id="int" bind:value={cTo} placeholder="WisprFlow" />
+        <label for="int">Replace with</label>
+        <input id="int" bind:value={cTo} placeholder="Yapper" />
       </div>
       <div class="field">
         <label for="cp">Priority</label>
         <input id="cp" bind:value={cPriority} inputmode="numeric" autocomplete="off" />
-        <p class="field-hint">Higher runs first (default 20). Corrections apply before dictionary.</p>
+        <p class="field-hint">Higher numbers take priority. Corrections run before dictionary replacements.</p>
       </div>
       <button type="button" class="btn btn-primary" onclick={addCorr}>Add / update</button>
       <ul class="list">

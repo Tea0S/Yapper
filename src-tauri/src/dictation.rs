@@ -296,8 +296,12 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
             append_text(&mut text, &tail);
             complete(app, state, id, &text, started).await;
             if !mic_error.is_empty() {
-                set_status(state, id, "ready", Some(mic_error)).await;
-                crate::set_dictation_outcome(state, "Microphone interrupted - captured text is on Home");
+                if capture.insert && !text.is_empty() {
+                    copy_fallback(state, id, &text, mic_error).await;
+                } else {
+                    set_status(state, id, "ready", Some(mic_error)).await;
+                    crate::set_dictation_outcome(state, "Microphone interrupted - captured text is on Home");
+                }
                 return Ok(text);
             }
             if !text.is_empty() {
@@ -309,33 +313,14 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
                     })
                     .await;
                     if let Err(error) = insert.map_err(|e| e.to_string()).and_then(|v| v) {
-                        set_status(state, id, "ready", Some(error)).await;
-                        crate::set_dictation_outcome(
-                            state,
-                            "Text ready in Home — destination changed",
-                        );
+                        copy_fallback(state, id, &text, error).await;
                     } else {
                         crate::set_dictation_outcome(state, "Dictation pasted");
                         crate::hud::sound_cue(app, 1100);
                     }
                 } else if capture.insert {
                     #[cfg(windows)]
-                    {
-                        set_status(
-                            state,
-                            id,
-                            "ready",
-                            Some(
-                                "Could not identify the destination. Copy your transcript here."
-                                    .into(),
-                            ),
-                        )
-                        .await;
-                        crate::set_dictation_outcome(
-                            state,
-                            "Transcript ready in Home — copy to insert",
-                        );
-                    }
+                    copy_fallback(state, id, &text, "Could not find the text field.".into()).await;
                     #[cfg(not(windows))]
                     {
                         // Preserve the established macOS/Linux paste path. Native destination
@@ -343,7 +328,7 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
                         if let Err(error) =
                             paste::paste_text_at_focus_spawn(app, text.clone()).await
                         {
-                            set_status(state, id, "ready", Some(error)).await;
+                            copy_fallback(state, id, &text, error).await;
                         }
                     }
                 }
@@ -353,8 +338,25 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
         Err(error) => {
             crate::hud::sound_cue(app, 220);
             set_status(state, id, "failed", Some(error.clone())).await;
-            crate::set_dictation_outcome(state, "Dictation saved temporarily — retry from Home");
+            crate::set_dictation_outcome(state, "Recording saved — try again from Home");
             Err(error)
+        }
+    }
+}
+
+/// A failed automatic insertion must not leave completed dictation stranded in Home.
+async fn copy_fallback(state: &AppState, id: u64, text: &str, reason: String) {
+    let output = text.to_owned();
+    let result = tokio::task::spawn_blocking(move || paste::copy_dictation(&output))
+        .await.map_err(|e| e.to_string()).and_then(|r| r);
+    match result {
+        Ok(()) => {
+            set_status(state, id, "ready", Some(format!("{reason} Copied to clipboard."))).await;
+            crate::set_dictation_outcome(state, "Copied — paste when ready");
+        }
+        Err(error) => {
+            set_status(state, id, "ready", Some(format!("{reason} Clipboard copy failed: {error}"))).await;
+            crate::set_dictation_outcome(state, "Clipboard unavailable — text saved in Home");
         }
     }
 }

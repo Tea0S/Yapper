@@ -70,7 +70,7 @@
 </script>
 
 <section>
-  <h1>File transcription</h1>
+  <h1>Transcribe a file</h1>
   <p class="muted">
     The file path must be readable by the inference host (this PC for local engine).
   </p>
