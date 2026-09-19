@@ -1,12 +1,23 @@
 <script lang="ts">
+  import { formatShortcutDisplay } from "$lib/formatShortcutDisplay";
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   let { recording, processing, peak, detail, label }:
     { recording: boolean; processing: boolean; peak: number; detail: string; label: string } = $props();
   let macos = $state(false);
+  let shortcutHint = $state("");
   onMount(() => {
-    void invoke<{ macos: boolean }>("hud_chrome_info").then(info => macos = info.macos).catch(() => {});
+    let cancelled = false;
+    void (async () => {
+      const info = await invoke<{ macos: boolean }>("hud_chrome_info");
+      const binds = await invoke<{ action: string; shortcut: string }[]>("list_keybinds_cmd");
+      if (cancelled) return;
+      macos = info.macos;
+      shortcutHint = binds.filter(b => b.shortcut && ["push_to_talk", "toggle_open_mic"].includes(b.action))
+        .map(b => `${b.action === "push_to_talk" ? "Hold" : "Toggle mic:"} ${formatShortcutDisplay(b.shortcut, { mac: macos })}`).join(" · ");
+    })().catch(() => {});
+    return () => { cancelled = true; };
   });
   const DRAG_THRESHOLD_PX = 6;
   let pointerDown = false;
@@ -65,7 +76,7 @@
 
 </script>
 <button type="button" class="pill" class:macos class:expanded={recording || processing || Boolean(detail)}
-  aria-label={`${label}. Open Yapper or drag to move`} title={`${label} · Click to open Yapper · Drag to move`}
+  aria-label={`${label}. Open Yapper or drag to move`} title={`${label}${shortcutHint ? ` · ${shortcutHint}` : ""} · Click to open Yapper · Drag to move`}
   onpointerdown={onPillPointerDown} onpointermove={onPillPointerMove} onpointerup={onPillPointerUp}
   onpointercancel={onPillPointerCancel} onkeydown={onPillKeydown}>
   {#if recording || processing || detail}
@@ -95,11 +106,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    transition:
-      min-width 0.18s ease,
-      min-height 0.18s ease,
-      padding 0.18s ease,
-      border-color 0.15s ease;
+    transition: border-color 0.15s ease;
     min-width: 72px;
     min-height: 22px;
     padding: 5px 14px;
@@ -143,7 +150,7 @@
     display: flex;
     align-items: flex-end;
     justify-content: center;
-    gap: 3px;
+    gap: 4px;
     height: 22px;
     width: 100%;
     max-width: 100%;
@@ -233,7 +240,15 @@
     }
   }
 
-  .pill, .pill.expanded { box-sizing: border-box; width: 100vw; height: 100vh; min-width: 0; min-height: 0; padding: 3px 12px; overflow: hidden; }
+  /* Keep the CSS curve inside the viewport so its antialiased edge is not clipped.
+     The native window adds just two pixels, never a reserved tooltip area. */
+  .pill, .pill.expanded {
+    box-sizing: border-box; margin: 1px;
+    width: calc(100vw - 2px); height: calc(100vh - 2px);
+    min-width: 0; min-height: 0; overflow: hidden;
+  }
+  .pill { padding: 5px 14px; }
+  .pill.expanded { padding: 5px 12px; }
   .pill:focus-visible { outline-offset: -2px; }
   @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } .dot { transition: none; } }
   .pill.macos {
