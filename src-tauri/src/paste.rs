@@ -2,40 +2,20 @@ use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::sync::mpsc;
 
-#[derive(Clone)]
-pub struct PasteTarget {
-    pub window: isize,
-    pub control: isize,
+struct PasteTarget {
     pub app_key: String,
-    pub element: Option<FocusedField>,
+    pub is_text_field: bool,
 }
 
-#[derive(Clone)]
-pub struct FocusedField {
-    runtime_id: Vec<i32>,
-    automation_id: String,
-    class_name: String,
-    control_type: i32,
-    bounds: [i32; 4],
-}
-
-impl FocusedField {
-    fn same_field(&self, other: &Self) -> bool {
-        if !self.runtime_id.is_empty() && self.runtime_id == other.runtime_id { return true; }
-        // Electron can recreate the accessibility object while the input stays put.
-        // Do not compare its text/name: those change as the user types.
-        self.control_type == other.control_type
-            && self.automation_id == other.automation_id
-            && self.class_name == other.class_name
-            && (!self.class_name.is_empty() || !self.automation_id.is_empty())
-            && self.bounds[2] > self.bounds[0] && self.bounds[3] > self.bounds[1]
-            && self.bounds == other.bounds
-    }
+fn is_text_control_type(control_type: i32) -> bool {
+    // UI Automation Edit and Document controls cover native inputs, browser
+    // textareas/contenteditable regions, office editors and Electron fields.
+    matches!(control_type, 50004 | 50030)
 }
 
 #[cfg(windows)]
-fn focused_element_id() -> Option<FocusedField> {
-    use windows::Win32::{System::{Com::*, Ole::*}, UI::Accessibility::*};
+fn focused_element_is_text_field() -> Option<bool> {
+    use windows::Win32::{System::Com::*, UI::Accessibility::*};
     use windows::core::Interface;
     unsafe {
         let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
@@ -46,45 +26,23 @@ fn focused_element_id() -> Option<FocusedField> {
                 let _ = timed.SetTransactionTimeout(300);
             }
             let element = automation.GetFocusedElement().ok()?;
-            let rect = element.CurrentBoundingRectangle().ok()?;
-            let identity = FocusedField {
-                runtime_id: Vec::new(),
-                automation_id: element.CurrentAutomationId().ok()?.to_string(),
-                class_name: element.CurrentClassName().ok()?.to_string(),
-                control_type: element.CurrentControlType().ok()?.0,
-                bounds: [rect.left, rect.top, rect.right, rect.bottom],
-            };
-            let array = element.GetRuntimeId().ok()?;
-            if array.is_null() { return None; }
-            let result = (|| {
-                let lo = SafeArrayGetLBound(array, 1).ok()?;
-                let hi = SafeArrayGetUBound(array, 1).ok()?;
-                if hi < lo || hi as i64 - lo as i64 > 128 { return None; }
-                let mut ids = Vec::new();
-                for i in lo..=hi {
-                    let mut id: i32 = 0;
-                    SafeArrayGetElement(array, &i, (&mut id as *mut i32).cast()).ok()?;
-                    ids.push(id);
-                }
-                Some(ids)
-            })();
-            let _ = SafeArrayDestroy(array);
-            result.map(|runtime_id| FocusedField { runtime_id, ..identity })
+            let control_type = element.CurrentControlType().ok()?.0;
+            Some(is_text_control_type(control_type)
+                || element.GetCurrentPattern(UIA_TextEditPatternId).is_ok())
         })();
         if initialized { CoUninitialize(); }
         result
     }
 }
 
-pub fn capture_target() -> Option<PasteTarget> {
+fn capture_target() -> Option<PasteTarget> {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO};
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
         use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_NAME_WIN32};
         use windows::Win32::Foundation::CloseHandle;
         let window = GetForegroundWindow();
-        let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
-        if window.0.is_null() || GetGUIThreadInfo(0, &mut info).is_err() { return None; }
+        if window.0.is_null() { return None; }
         let mut pid = 0;
         GetWindowThreadProcessId(window, Some(&mut pid));
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
@@ -94,31 +52,36 @@ pub fn capture_target() -> Option<PasteTarget> {
         let _ = CloseHandle(process);
         found.ok()?;
         let app_key = String::from_utf16_lossy(&path[..len as usize]).to_lowercase();
-        return Some(PasteTarget { window: window.0 as isize, control: info.hwndFocus.0 as isize, app_key, element: focused_element_id() });
+        return Some(PasteTarget {
+            app_key,
+            is_text_field: focused_element_is_text_field().unwrap_or(false),
+        });
     }
     #[cfg(not(windows))]
     { None }
 }
 
-/// Validate immediately before insertion on the main thread. Never steal focus.
-pub fn paste_to_target(app: &tauri::AppHandle, target: PasteTarget, text: String) -> Result<(), String> {
-    let conn = crate::open_db(app)?;
-    let key = format!("paste_multiline_app_{}", target.app_key);
-    let multiline = crate::db::get_setting(&conn, &key).map_err(|e| e.to_string())?.as_deref() == Some("true");
+/// Insert into the text field focused when transcription finishes. Never steal focus.
+/// Resolve the destination here rather than when recording starts so switching apps
+/// between dictations does not leave a valid text field looking stale.
+pub fn paste_to_focused_text_field(app: &tauri::AppHandle, text: String) -> Result<String, String> {
     let (tx, rx) = mpsc::channel();
+    let app_copy = app.clone();
     app.run_on_main_thread(move || {
         let result = (|| {
             let current = capture_target().ok_or("Could not find the text field.")?;
-            if current.window != target.window || current.control != target.control || current.app_key != target.app_key
-                || matches!((&target.element, &current.element), (Some(expected), Some(actual)) if !expected.same_field(actual)) {
-                return Err("The active text field changed.".to_string());
+            if !current.is_text_field {
+                return Err("The focused control is not a text field.".to_string());
             }
+            let conn = crate::open_db(&app_copy)?;
+            let key = format!("paste_multiline_app_{}", current.app_key);
+            let multiline = crate::db::get_setting(&conn, &key).map_err(|e| e.to_string())?.as_deref() == Some("true");
             if multiline && !text_has_spoken_key_sentinels(&text) {
                 let mut cb = Clipboard::new().map_err(|e| e.to_string())?;
                 let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
                 paste_clipboard_chunk(&mut cb, &mut enigo, &text)?;
             } else { paste_text_at_focus(&text)?; }
-            Ok(())
+            Ok(current.app_key)
         })();
         let _ = tx.send(result);
     }).map_err(|e| e.to_string())?;
@@ -320,26 +283,11 @@ pub async fn undo_n_times_at_focus_spawn(app: &tauri::AppHandle, n: u32) -> Resu
 #[cfg(test)]
 mod field_tests {
     use super::*;
-    fn field() -> FocusedField {
-        FocusedField { runtime_id: vec![1], automation_id: "message".into(),
-            class_name: "editable".into(), control_type: 50004, bounds: [10, 20, 300, 80] }
-    }
     #[test]
-    fn recreated_field_is_still_the_destination() {
-        let a = field(); let mut b = field(); b.runtime_id = vec![2];
-        assert!(a.same_field(&b));
-    }
-    #[test]
-    fn different_field_is_not_the_destination() {
-        let a = field(); let mut b = field(); b.runtime_id = vec![2];
-        b.automation_id = "search".into(); assert!(!a.same_field(&b));
-        b.automation_id = a.automation_id.clone(); b.bounds = [10, 100, 300, 160];
-        assert!(!a.same_field(&b));
-    }
-    #[test]
-    fn anonymous_objects_need_a_stable_runtime_id() {
-        let mut a = field(); a.automation_id.clear(); a.class_name.clear();
-        let mut b = a.clone(); b.runtime_id = vec![2]; assert!(!a.same_field(&b));
-        b.runtime_id = a.runtime_id.clone(); assert!(a.same_field(&b));
+    fn only_edit_and_document_controls_accept_dictation() {
+        assert!(is_text_control_type(50004));
+        assert!(is_text_control_type(50030));
+        assert!(!is_text_control_type(50000));
+        assert!(!is_text_control_type(50005));
     }
 }

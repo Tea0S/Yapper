@@ -24,7 +24,6 @@ pub struct Dictation {
 
 pub struct Capture {
     insert: bool,
-    target: Option<paste::PasteTarget>,
     stop: Arc<AtomicBool>,
     progress: Option<tokio::task::JoinHandle<(usize, String)>>,
 }
@@ -93,13 +92,7 @@ pub async fn start(app: &tauri::AppHandle, state: &AppState, insert: bool) -> Re
     let pause_ms = crate::open_db(app).ok()
         .and_then(|c| db::get_setting(&c, "vad_min_silence_ms").ok().flatten())
         .and_then(|v| v.parse::<usize>().ok()).unwrap_or(500).clamp(750, 3000);
-    let target_task = insert.then(|| tokio::task::spawn_blocking(paste::capture_target));
     crate::start_capture(app, state).await?;
-    // Capture destination identity concurrently so UI Automation cannot delay mic opening.
-    let target = match target_task {
-        Some(task) => task.await.unwrap_or(None),
-        None => None,
-    };
     let stop = Arc::new(AtomicBool::new(false));
     let progress = if enabled(app, "background_dictation", true) && !enabled(app, "live_dictation_experimental", false) {
         let app = app.clone();
@@ -175,7 +168,6 @@ pub async fn start(app: &tauri::AppHandle, state: &AppState, insert: bool) -> Re
     };
     *capture = Some(Capture {
         insert,
-        target,
         stop,
         progress,
     });
@@ -251,7 +243,7 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
             status: "queued".into(),
             error: None,
             elapsed_ms: 0,
-            app_key: capture.target.as_ref().map(|t| t.app_key.clone()),
+            app_key: None,
         });
     }
     // Reserve FIFO order before permitting the next capture to stop.
@@ -305,22 +297,24 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
                 return Ok(text);
             }
             if !text.is_empty() {
-                if let Some(target) = capture.target {
-                    let app_copy = app.clone();
-                    let output = text.clone();
-                    let insert = tokio::task::spawn_blocking(move || {
-                        paste::paste_to_target(&app_copy, target, output)
-                    })
-                    .await;
-                    if let Err(error) = insert.map_err(|e| e.to_string()).and_then(|v| v) {
-                        copy_fallback(state, id, &text, error).await;
-                    } else {
-                        crate::set_dictation_outcome(state, "Dictation pasted");
-                        crate::hud::sound_cue(app, 1100);
-                    }
-                } else if capture.insert {
+                if capture.insert {
                     #[cfg(windows)]
-                    copy_fallback(state, id, &text, "Could not find the text field.".into()).await;
+                    {
+                        let app_copy = app.clone();
+                        let output = text.clone();
+                        let insert = tokio::task::spawn_blocking(move || {
+                            paste::paste_to_focused_text_field(&app_copy, output)
+                        })
+                        .await;
+                        match insert.map_err(|e| e.to_string()).and_then(|v| v) {
+                            Ok(app_key) => {
+                                set_app_key(state, id, app_key).await;
+                                crate::set_dictation_outcome(state, "Dictation pasted");
+                                crate::hud::sound_cue(app, 1100);
+                            }
+                            Err(error) => copy_fallback(state, id, &text, error).await,
+                        }
+                    }
                     #[cfg(not(windows))]
                     {
                         // Preserve the established macOS/Linux paste path. Native destination
@@ -341,6 +335,12 @@ pub async fn stop(app: &tauri::AppHandle, state: &AppState) -> Result<String, St
             crate::set_dictation_outcome(state, "Recording saved — try again from Home");
             Err(error)
         }
+    }
+}
+
+async fn set_app_key(state: &AppState, id: u64, app_key: String) {
+    if let Some(j) = state.dictation.jobs.lock().await.iter_mut().find(|j| j.id == id) {
+        j.app_key = Some(app_key);
     }
 }
 

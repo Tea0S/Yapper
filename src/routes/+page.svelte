@@ -109,7 +109,7 @@
   }
 
   let showWhatsNew = $state(false);
-  const WHATS_NEW_VERSION = "1.3.10";
+  const WHATS_NEW_VERSION = "1.3.11";
 
   type MicLevel = { rms: number; peak: number };
   let micLevel = $state<MicLevel>({ rms: 0, peak: 0 });
@@ -359,14 +359,14 @@
 
 <section class="hero">
   {#if showWhatsNew}
-    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.10">
+    <div class="panel whats-new" role="region" aria-label="What's new in 1.3.11">
       <div class="whats-new-head">
-        <h2 class="whats-new-title">What’s new in 1.3.10</h2>
+        <h2 class="whats-new-title">What’s new in 1.3.11</h2>
         <button type="button" class="btn mini" onclick={dismissWhatsNew}>Dismiss</button>
       </div>
       <ul class="whats-new-list">
-        <li>More reliable paste detection when an app redraws its text field</li>
-        <li>Shorter labels, clearer instructions, and less clutter</li>
+        <li>Dictation now follows your currently focused text field when you switch apps</li>
+        <li>Non-text controls remain protected from automatic insertion</li>
       </ul>
     </div>
   {/if}
