@@ -16,6 +16,7 @@ fn is_text_control_type(control_type: i32) -> bool {
 #[cfg(windows)]
 fn focused_element_is_text_field() -> Option<bool> {
     use windows::Win32::{System::Com::*, UI::Accessibility::*};
+    use windows::Win32::UI::WindowsAndMessaging::STATE_SYSTEM_READONLY;
     use windows::core::Interface;
     unsafe {
         let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
@@ -26,25 +27,65 @@ fn focused_element_is_text_field() -> Option<bool> {
                 let _ = timed.SetTransactionTimeout(300);
             }
             let element = automation.GetFocusedElement().ok()?;
-            let control_type = element.CurrentControlType().ok()?.0;
-            Some(is_text_control_type(control_type)
-                || element.GetCurrentPattern(UIA_TextEditPatternId).is_ok())
+            if element.CurrentIsEnabled().ok().is_some_and(|enabled| !enabled.as_bool()) {
+                return Some(false);
+            }
+            let value = element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .ok().and_then(|pattern| pattern.CurrentIsReadOnly().ok())
+                .map(|readonly| readonly.as_bool());
+            if value == Some(true) { return Some(false); }
+            // Chromium/Electron and older native editors may expose editable
+            // fields through the legacy role instead of Edit/TextEdit.
+            let legacy = element.GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(UIA_LegacyIAccessiblePatternId).ok();
+            let legacy_text = legacy.as_ref()
+                .and_then(|pattern| pattern.CurrentRole().ok()) == Some(ROLE_SYSTEM_TEXT);
+            let legacy_state = legacy.as_ref().and_then(|pattern| pattern.CurrentState().ok());
+            if legacy_text && legacy_state.is_some_and(|state| state & (STATE_SYSTEM_READONLY | 1) != 0) {
+                return Some(false);
+            }
+            let control_type = element.CurrentControlType().ok().map(|kind| kind.0);
+            let text = control_type.is_some_and(is_text_control_type)
+                || value == Some(false)
+                || element.GetCurrentPattern(UIA_TextEditPatternId).is_ok()
+                || (legacy_text && legacy_state.is_some());
+            // An unrecognized type is inconclusive: some editors expose only
+            // their containing pane. Let a native caret establish text focus.
+            if text { return Some(true); }
+            // A button, menu, or other known non-text control is a definite
+            // rejection. Only generic containers/text need the caret fallback.
+            match control_type {
+                None | Some(50020 | 50025 | 50026 | 50032 | 50033) => None,
+                _ => Some(false),
+            }
         })();
         if initialized { CoUninitialize(); }
         result
     }
 }
 
+fn accepts_text_focus(accessibility: Option<bool>, native_caret: bool) -> bool {
+    accessibility.unwrap_or(native_caret)
+}
+
 fn capture_target() -> Option<PasteTarget> {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, GetGUIThreadInfo, GUITHREADINFO};
         use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_NAME_WIN32};
         use windows::Win32::Foundation::CloseHandle;
         let window = GetForegroundWindow();
         if window.0.is_null() { return None; }
         let mut pid = 0;
-        GetWindowThreadProcessId(window, Some(&mut pid));
+        let thread = GetWindowThreadProcessId(window, Some(&mut pid));
+        let accessibility = focused_element_is_text_field();
+        let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        let native_caret = GetGUIThreadInfo(thread, &mut info).is_ok()
+            && !info.hwndFocus.0.is_null()
+            && !info.hwndCaret.0.is_null()
+            && info.rcCaret.bottom > info.rcCaret.top;
+        // Avoid combining app settings and field information across a switch
+        // that happens while the accessibility provider answers.
+        if GetForegroundWindow() != window { return None; }
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut path = [0u16; 32768];
         let mut len = path.len() as u32;
@@ -54,7 +95,7 @@ fn capture_target() -> Option<PasteTarget> {
         let app_key = String::from_utf16_lossy(&path[..len as usize]).to_lowercase();
         return Some(PasteTarget {
             app_key,
-            is_text_field: focused_element_is_text_field().unwrap_or(false),
+            is_text_field: accepts_text_focus(accessibility, native_caret),
         });
     }
     #[cfg(not(windows))]
@@ -289,5 +330,15 @@ mod field_tests {
         assert!(is_text_control_type(50030));
         assert!(!is_text_control_type(50000));
         assert!(!is_text_control_type(50005));
+    }
+    #[test]
+    fn native_caret_recovers_missing_accessibility_information() {
+        assert!(accepts_text_focus(None, true));
+        assert!(!accepts_text_focus(None, false));
+    }
+    #[test]
+    fn disabled_or_readonly_field_cannot_be_overridden_by_a_caret() {
+        assert!(!accepts_text_focus(Some(false), true));
+        assert!(accepts_text_focus(Some(true), false));
     }
 }
